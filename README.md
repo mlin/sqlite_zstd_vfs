@@ -124,7 +124,7 @@ Some parameters are controlled from the file URI's query string opening the data
 * **&outer_cache_size=-2000**: page cache size for outer database, in [PRAGMA cache_size](https://www.sqlite.org/pragma.html#pragma_cache_size) units. Limited effect if on SSD.
 
 * **PRAGMA page_size=4096**: uncompressed [page size](https://www.sqlite.org/pragma.html#pragma_page_size) for the newly-created inner database. Larger pages are more compressible, but increase [read/write amplification](http://smalldatum.blogspot.com/2015/11/read-write-space-amplification-pick-2_23.html). YMMV but 8 or 16 KiB have been working well for us.
-* **PRAGMA auto_vacuum=NONE**: set to FULL or INCREMENTAL on a newly-created database if you expect its size to fluctuate over time, so that the file will [shrink to fit]((https://www.sqlite.org/pragma.html#pragma_auto_vacuum). (The outer database auto-vacuums when it's closed.)
+* **PRAGMA auto_vacuum=NONE**: set to FULL or INCREMENTAL on a newly-created database if you expect its size to fluctuate over time, so that the file will [shrink to fit](https://www.sqlite.org/pragma.html#pragma_auto_vacuum). (The outer database auto-vacuums when it's closed.)
 * **PRAGMA journal_mode=DELETE**: set to MEMORY or OFF as discussed in [ZIPVFS docs](https://www.sqlite.org/zipvfs/doc/trunk/www/howitworks.wiki) *Multple Journal Files*. (As explained there, this shouldn't compromise transaction safety.)
 
 * **PRAGMA cache_size=-2000**: page cache size for inner database, in [PRAGMA cache_size](https://www.sqlite.org/pragma.html#pragma_cache_size) units. Critical for complex query performance, as illustrated above.
