@@ -1,0 +1,14 @@
+name: tests
+on: [push, pull_request]
+jobs:
+  ctest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        BUILD_TYPE: [Debug, Release]
+    steps:
+    - uses: actions/checkout@v2
+    - name: docker build
+      run: sudo docker build -t tests --build-arg build_type=${{ matrix.BUILD_TYPE }} .
+    - name: run tests
+      run: sudo docker run tests
