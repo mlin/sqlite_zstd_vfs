@@ -113,7 +113,7 @@ bool UpdateCells(SQLite::Database &db, SQLite::Statement &get_state, SQLite::Sta
     get_state.reset();
     assert(last_pos == n / 2);
     if (rule == log_rule) {
-        for (int i = n / 2; i < std::min(state.size(), (size_t)(n/2+100)); i++) {
+        for (int i = n / 2; i < std::min(state.size(), (size_t)(n / 2 + 100)); i++) {
             cerr << (state[i] ? "█" : " ");
         }
         cerr << endl;
@@ -150,7 +150,8 @@ TEST_CASE("cellular_automata") {
                                         SQLite::OPEN_URI);
 
         auto schema = "CREATE TABLE cellular_automata(state INTEGER, rule INTEGER, pos INTEGER, "
-                      "PRIMARY KEY(rule,pos))";
+                      "PRIMARY KEY(rule,pos));"
+                      "CREATE INDEX dummy_index ON cellular_automata(state)";
         control.exec(schema);
         experiment.exec("PRAGMA journal_mode=MEMORY; PRAGMA auto_vacuum=FULL");
         experiment.exec(schema);
@@ -182,7 +183,7 @@ TEST_CASE("cellular_automata") {
         auto get_state = "SELECT state, pos FROM cellular_automata WHERE rule = ? ORDER BY pos";
         SQLite::Statement ctrl_get_state(control, get_state), expt_get_state(experiment, get_state);
         cerr << endl;
-        for (int t = 1; t <= 420; t++) {
+        for (int t = 1; t <= 250; t++) {
             bool rule30bit;
             for (auto rule : rules) {
                 bool ans = UpdateCells(control, ctrl_get_state, ctrl_insert, ctrl_update, rule, 30);

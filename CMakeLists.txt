@@ -15,6 +15,7 @@ if(${CMAKE_VERSION} VERSION_LESS 3.14)
     endmacro()
 endif()
 
+set(SQLITECPP_INTERNAL_SQLITE OFF CACHE INTERNAL "")
 FetchContent_Declare(
     sqlitecpp
     GIT_REPOSITORY  https://github.com/SRombauts/SQLiteCpp.git
@@ -38,11 +39,6 @@ target_link_libraries(nested_vfs PRIVATE SQLiteCpp)
 add_library(zstd_vfs SHARED src/zstd_vfs.cc src/SQLiteNestedVFS.h src/SQLiteVFS.h src/zstd_vfs.h)
 SET_TARGET_PROPERTIES(zstd_vfs PROPERTIES PREFIX "")
 target_link_libraries(zstd_vfs PRIVATE SQLiteCpp zstd)
-
-add_custom_target(pretty COMMAND clang-format -i -style='{IndentWidth: 4, ColumnLimit: 100}'
-                    ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cc
-                    ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h
-                    ${CMAKE_CURRENT_SOURCE_DIR}/test/*.cc)
 
 FetchContent_Declare(
     catch

@@ -7,7 +7,7 @@ ARG build_type=Release
 RUN apt-get -qq update && \
      apt-get -qq install -y --no-install-recommends --no-install-suggests \
      ca-certificates curl wget git-core \
-     build-essential cmake valgrind clang-format \
+     build-essential cmake valgrind clang-format cppcheck \
      sqlite3 libsqlite3-dev libzstd-dev \
      python3-pytest pylint black aria2 zstd samtools
 

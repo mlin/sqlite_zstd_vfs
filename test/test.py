@@ -165,7 +165,7 @@ def test_sam(tmpdir):
         cwd=tmpdir,
     )
     subprocess.run(
-        f"samtools view {region}.bam | zstd -6 -T0 - -o {region}.sam.zst",
+        f"samtools view {region}.bam | zstd -8 -T0 - -o {region}.sam.zst",
         check=True,
         shell=True,
         cwd=tmpdir,
@@ -215,6 +215,12 @@ def test_sam(tmpdir):
         shell=True,
         cwd=tmpdir,
     )
+    subprocess.run(
+        f"zstd -8 -T0 -c {region}.zstd.sqlite > {region}.zstd.sqlite.zst",
+        check=True,
+        shell=True,
+        cwd=tmpdir,
+    )
     subprocess.run(["ls", "-lh"], cwd=tmpdir)
 
     # verify db file size is in the ballpark of the sam.zst file size
@@ -223,7 +229,7 @@ def test_sam(tmpdir):
     zstd_sqlite = os.path.join(tmpdir, f"{region}.zstd.sqlite")
     zstd_sqlite_size = os.path.getsize(zstd_sqlite)
     ratio = float(zstd_sqlite_size) / sam_zst_size
-    assert ratio >= 0.5 and ratio <= 1.5
+    assert ratio <= 1.6
 
     # verify outer page size
     con = sqlite3.connect(f"file:{zstd_sqlite}?mode=ro", uri=True)
@@ -260,7 +266,7 @@ def test_tpch(tmpdir):
             "--outer-page-KiB",
             "16",
             "--level",
-            "8"
+            "8",
         ],
         check=True,
         stdout=subprocess.PIPE,
