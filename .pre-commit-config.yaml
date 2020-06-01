@@ -14,7 +14,7 @@ repos:
     files: \.(c|cc|cxx|cpp|h|hpp|hxx)$
     verbose: true
     entry: cppcheck
-    args: [-q,--std=c++11]
+    args: [-q,--language=c++]
   - id: black
     name: black
     language: system

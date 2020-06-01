@@ -197,7 +197,11 @@ TEST_CASE("cellular_automata") {
             new_rules.insert(new_rules.end(), rules.begin(), rules.begin() + cut_pos);
             REQUIRE(new_rules.size() == rules.size());
         }
-
+    }
+    {
+        SQLite::Database control(testdir + "/control", SQLite::OPEN_READONLY);
+        SQLite::Database experiment("file:" + testdir + "/experiment?vfs=nested",
+                                    SQLite::OPEN_READONLY, SQLite::OPEN_URI);
         // verify db identity
         auto get_all = "SELECT state, rule, pos FROM cellular_automata ORDER BY rule, pos";
         SQLite::Statement ctrl_get_all(control, get_all), expt_get_all(experiment, get_all);

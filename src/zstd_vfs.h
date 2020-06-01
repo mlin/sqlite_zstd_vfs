@@ -201,11 +201,10 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
                 put_dict_.reset(new SQLite::Statement(
                     *outer_db_, "INSERT INTO nested_vfs_zstd_dicts(dict,page_count) VALUES(?,?)"));
             }
-            commit();
-            SQLite::Transaction txn(*outer_db_);
             StatementResetter put_dict_resetter(*put_dict_);
             put_dict_->bindNoCopy(1, dict.data(), dict.size());
             put_dict_->bind(2, dict_page_count);
+            begin();
             if (put_dict_->exec() != 1) {
                 throw SQLite::Exception("unexpected result from dict insert", SQLITE_IOERR_WRITE);
             }
@@ -214,7 +213,6 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
                 throw SQLite::Exception("unexpected rowid from dict insert", SQLITE_IOERR_WRITE);
             }
             EnsureDictCached(dict_id);
-            txn.commit();
 
             // switch to the new dict
             cur_dict_ = dict_id;
