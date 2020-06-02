@@ -40,18 +40,20 @@ add_library(zstd_vfs SHARED src/zstd_vfs.cc src/SQLiteNestedVFS.h src/SQLiteVFS.
 SET_TARGET_PROPERTIES(zstd_vfs PROPERTIES PREFIX "")
 target_link_libraries(zstd_vfs PRIVATE SQLiteCpp zstd)
 
-FetchContent_Declare(
-    catch
-    GIT_REPOSITORY  https://github.com/catchorg/Catch2.git
-    GIT_TAG         v2.12.1
-)
-FetchContent_MakeAvailable(catch)
-include_directories(${catch_SOURCE_DIR}/single_include)
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+    FetchContent_Declare(
+        catch
+        GIT_REPOSITORY  https://github.com/catchorg/Catch2.git
+        GIT_TAG         v2.12.1
+    )
+    FetchContent_MakeAvailable(catch)
+    include_directories(${catch_SOURCE_DIR}/single_include)
 
-add_executable(test_exe test/test.cc test/test_vfstrace.c src/SQLiteNestedVFS.h src/SQLiteVFS.h)
-target_link_libraries(test_exe PRIVATE SQLiteCpp)
+    add_executable(test_exe test/test.cc test/test_vfstrace.c src/SQLiteNestedVFS.h src/SQLiteVFS.h)
+    target_link_libraries(test_exe PRIVATE SQLiteCpp)
 
-include(CTest)
-enable_testing()
-add_test(NAME test_exe COMMAND ./test_exe -d yes)
-add_test(NAME pytest COMMAND python3 -m pytest -sv ${CMAKE_CURRENT_SOURCE_DIR}/test/test.py)
+    include(CTest)
+    enable_testing()
+    add_test(NAME test_exe COMMAND ./test_exe -d yes)
+    add_test(NAME pytest COMMAND python3 -m pytest -sv ${CMAKE_CURRENT_SOURCE_DIR}/test/test.py)
+endif()

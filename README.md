@@ -22,7 +22,7 @@ git clone https://github.com/mlin/sqlite_zstd_vfs.git
 cd sqlite_zstd_vfs
 
 cmake -DCMAKE_BUILD_TYPE=Release -B build
-cmake --build build
+cmake --build build -j $(nproc)
 ```
 
 Download a ~1MB example database and use the `sqlite3` CLI to create a compressed version of it:
