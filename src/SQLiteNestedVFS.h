@@ -30,10 +30,9 @@ namespace SQLiteNested {
 // KEY ASSUMPTIONS:
 //   1. SQLite only calls the VFS xWrite() with one or more whole pages, and its first xWrite() to
 //      a new db is exactly one whole page.
-//   2. xSync(), xTruncate(), and xClose() are only called at moments when the inner database will
-//      be consistent once previously written pages are all flushed. That is, SQLite would never
-//      explicitly request to sync an inconsistent state of the main db file in the middle of a
-//      transaction.
+//   2. xSync() and xClose() are only called at moments when the inner database will be consistent
+//      once previously written pages are flushed. That is, SQLite would never explicitly request
+//      to sync inconsistent state of the main db file in the middle of a transaction.
 class InnerDatabaseFile : public SQLiteVFS::File {
   protected:
     std::unique_ptr<SQLite::Database> outer_db_;
@@ -41,7 +40,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     bool read_only_;
     size_t page_size_ = 0, page_count_ = 0, pages_written_ = 0;
     // cached statements; must be declared after outer_db_ so that they're destructed first
-    SQLite::Statement select_pages_, select_page_count_, begin_, commit_;
+    std::unique_ptr<SQLite::Transaction> txn_;
+    SQLite::Statement select_pages_, select_page_count_;
     std::unique_ptr<SQLite::Statement> insert_page_, update_page_, delete_pages_;
 
     // RAII helper
@@ -58,30 +58,10 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     // subsequent writes, which we commit upon Sync() or Close(). We never explicitly rollback this
     // transaction, although rollback may occur if the process/host crashes. By Assumption 2 above,
     // inner db should always recover to a consistent state.
-    bool txn_ = false;
     void begin() {
         assert(!read_only_);
         if (!txn_) {
-            StatementResetter resetter(begin_);
-            if (begin_.executeStep()) {
-                throw SQLite::Exception("unexpected result from BEGIN", SQLITE_ERROR);
-            }
-            txn_ = true;
-        }
-    }
-    void commit() {
-        if (txn_) {
-            StatementResetter resetter(commit_);
-            try {
-                if (commit_.executeStep()) {
-                    throw SQLite::Exception("unexpected result from COMMIT", SQLITE_ERROR);
-                }
-                txn_ = false;
-            } catch (std::exception &exn) {
-                _DBG << exn.what() << _EOL;
-                page_count_ = 0; // to be redetected
-                throw;
-            }
+            txn_.reset(new SQLite::Transaction(*outer_db_));
         }
     }
 
@@ -161,14 +141,17 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 #endif
 
     int Close() override {
-        try {
-            commit();
-            if (pages_written_) {
-                outer_db_->exec("PRAGMA incremental_vacuum");
+        if (!read_only_) {
+            int rc;
+            if ((rc = Sync(0)) != 0) {
+                return rc;
             }
-        } catch (SQLite::Exception &exn) {
-            _DBG << exn.what() << _EOL;
-            return exn.getErrorCode();
+            try {
+                outer_db_->exec("PRAGMA incremental_vacuum");
+            } catch (SQLite::Exception &exn) {
+                _DBG << exn.what() << _EOL;
+                return exn.getErrorCode();
+            }
         }
 #ifndef NDEBUG
         if (sequential_reads_ || non_sequential_reads_) {
@@ -296,7 +279,6 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             assert(iOfst / page_size_ <= page_count_);
 
             // upsert each provided page
-            begin();
             int sofar = 0;
             std::vector<char> pagebuf;
             pagebuf.reserve(page_size_);
@@ -380,8 +362,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             }
             delete_pages_->bind(1, new_page_count);
             StatementResetter resetter(*delete_pages_);
+            begin();
             delete_pages_->exec();
-            commit();
             page_count_ = new_page_count;
             return SQLITE_OK;
         } catch (std::exception &exn) {
@@ -394,8 +376,13 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     int Sync(int flags) override {
         assert(!read_only_);
         try {
-            commit();
+            if (txn_) {
+                txn_->commit();
+                txn_.reset();
+            }
         } catch (SQLite::Exception &exn) {
+            _DBG << exn.what() << _EOL;
+            page_count_ = 0; // to be redetected
             return exn.getErrorCode();
         }
         return SQLITE_OK;
@@ -474,8 +461,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                         "SELECT * FROM " + inner_db_tablename_prefix_ +
                             "pages WHERE page_idx >= ? AND page_idx < ? ORDER BY page_idx"),
           select_page_count_(*outer_db_, "SELECT COUNT(page_idx), SUM(page_idx) FROM " +
-                                             inner_db_tablename_prefix_ + "pages"),
-          begin_(*outer_db_, "BEGIN"), commit_(*outer_db_, "COMMIT") {
+                                             inner_db_tablename_prefix_ + "pages") {
         methods_.iVersion = 1;
         assert(outer_db_->execAndGet("PRAGMA quick_check").getString() == "ok");
     }
