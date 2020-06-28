@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <libgen.h>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -35,15 +36,6 @@ namespace SQLiteNested {
 //      to sync inconsistent state of the main db file in the middle of a transaction.
 class InnerDatabaseFile : public SQLiteVFS::File {
   protected:
-    std::unique_ptr<SQLite::Database> outer_db_;
-    std::string inner_db_tablename_prefix_; // can be overridden in VFS, not here
-    bool read_only_;
-    size_t page_size_ = 0, page_count_ = 0, pages_written_ = 0;
-    // cached statements; must be declared after outer_db_ so that they're destructed first
-    std::unique_ptr<SQLite::Transaction> txn_;
-    SQLite::Statement select_pages_, select_page_count_;
-    std::unique_ptr<SQLite::Statement> insert_page_, update_page_, delete_pages_;
-
     // RAII helper
     class StatementResetter {
       private:
@@ -53,6 +45,15 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         StatementResetter(SQLite::Statement &stmt) : stmt_(stmt) {}
         ~StatementResetter() { stmt_.tryReset(); }
     };
+
+    std::unique_ptr<SQLite::Database> outer_db_;
+    std::string inner_db_tablename_prefix_; // can be overridden in VFS, not here
+    bool read_only_;
+    size_t page_size_ = 0, page_count_ = 0;
+    // cached statements; must be declared after outer_db_ so that they're destructed first
+    std::unique_ptr<SQLite::Transaction> txn_;
+    SQLite::Statement select_pages_, select_page_count_;
+    std::unique_ptr<SQLite::Statement> insert_page_, update_page_, delete_pages_;
 
     // On the first Write() we open a transaction with the outer db as a buffer for this and
     // subsequent writes, which we commit upon Sync() or Close(). We never explicitly rollback this
@@ -127,12 +128,96 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         memcpy(dest, data.getBlob(), page_size_);
     }
 
-    // Encode one page for storage as a blob in the outer db (page_size_ bytes in). Override me!
-    // Bind columns: 1=data, 2=meta1, 3=meta2
-    // pagebuf is scratch space that can be resized and overwritten, then use upsert.bindNoCopy()
-    virtual void EncodePage(sqlite3_int64 page_idx, const void *src, std::vector<char> &pagebuf,
-                            SQLite::Statement &upsert) {
-        upsert.bindNoCopy(1, src, page_size_);
+    // holds state of page-encoding background job
+    struct EncodeJob {
+        // job inputs
+        sqlite3_int64 page_idx = -1;
+        std::string page;
+
+        // job outputs
+        sqlite3_int64 meta1, meta2;
+        bool meta1null = true, meta2null = true;
+        const char *encoded_page = nullptr;
+        size_t encoded_page_size = 0;
+
+        std::string errmsg;
+
+        virtual ~EncodeJob() = default;
+        virtual void Execute() {
+            // Execute the job, possibly on a worker thread; for subclass to override
+            encoded_page = page.data();
+            encoded_page_size = page.size();
+        }
+    };
+
+    // construct EncodeJob (may be overridden by subclass with additional state)
+    virtual std::unique_ptr<EncodeJob> NewEncodeJob() {
+        return std::unique_ptr<EncodeJob>(new EncodeJob);
+    }
+    // pool of EncodeJob instances, to minimize allocations
+    std::vector<std::unique_ptr<EncodeJob>> encode_job_pool_;
+    std::mutex encode_job_pool_mutex_;
+    virtual void InitEncodeJob(EncodeJob &job, sqlite3_int64 page_idx, const void *page_data) {
+        // Initialize job in main thread
+        job.page_idx = page_idx;
+        if (page_data) {
+            // copy page data for background-encoding
+            job.page.assign((const char *)page_data, page_size_);
+        } else {
+            job.page.assign(page_size_, 0);
+        }
+
+        job.meta1null = job.meta2null = true;
+        job.encoded_page = nullptr;
+        job.encoded_page_size = 0;
+        job.errmsg.clear();
+    }
+
+    void UpsertPage(sqlite_int64 page_idx, const void *page) {
+        assert(page_idx <= page_count_);
+        try {
+            std::unique_ptr<EncodeJob> job;
+            {
+                // fetch from pool
+                std::lock_guard<std::mutex> lock(encode_job_pool_mutex_);
+                if (!encode_job_pool_.empty()) {
+                    encode_job_pool_.back().swap(job);
+                    encode_job_pool_.pop_back();
+                    assert(job);
+                }
+            }
+            if (!job) {
+                NewEncodeJob().swap(job);
+            }
+            InitEncodeJob(*job, page_idx, page);
+            job->Execute();
+            auto &upsert = page_idx < page_count_ ? update_page_ : insert_page_;
+            upsert->clearBindings();
+            upsert->bindNoCopy(1, job->encoded_page, job->encoded_page_size);
+            if (!job->meta1null) {
+                upsert->bind(2, job->meta1);
+            }
+            if (!job->meta2null) {
+                upsert->bind(3, job->meta2);
+            }
+            upsert->bind(4, job->page_idx);
+            StatementResetter resetter(*upsert);
+            if (upsert->exec() != 1) {
+                throw SQLite::Exception("unexpected result from page upsert " +
+                                            std::to_string(page_idx),
+                                        SQLITE_IOERR_WRITE);
+            }
+            {
+                // return to pool
+                std::lock_guard<std::mutex> lock(encode_job_pool_mutex_);
+                encode_job_pool_.emplace_back(job.release());
+            }
+            page_count_ += page_idx < page_count_ ? 0 : 1;
+        } catch (std::exception &exn) {
+            _DBG << exn.what() << _EOL;
+            page_count_ = 0; // to be redetected
+            throw;
+        }
     }
 
 #ifndef NDEBUG
@@ -250,15 +335,16 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     int Write(const void *zBuf, int iAmt, sqlite3_int64 iOfst) override {
         assert(iAmt >= 0);
         assert(!read_only_);
+        if (!iAmt) {
+            return SQLITE_OK;
+        }
         try {
-            if (!iAmt) {
-                return SQLITE_OK;
-            }
-            if (!DetectPageSize()) { // db is new; assume caller is writing one whole page
+            if (!DetectPageSize()) {
+                // db is new; assume caller is writing one whole page
                 page_size_ = iAmt;
             }
-            if (iAmt % page_size_ || iOfst % page_size_) { // non-aligned write
-                return SQLITE_IOERR_WRITE;
+            if (iAmt % page_size_ || iOfst % page_size_) {
+                throw SQLite::Exception("non-aligned write", SQLITE_IOERR_WRITE);
             }
 
             if (!insert_page_) {
@@ -273,19 +359,17 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             }
 
             begin();
-            if (iOfst / page_size_ > DetectPageCount()) { // write past current EOF
-                AppendBlankPages(iOfst / page_size_ - page_count_);
+            while (iOfst / page_size_ > DetectPageCount()) {
+                // write past current EOF; fill "hole" with zeroes
+                UpsertPage((sqlite3_int64)page_count_, nullptr);
             }
-            assert(iOfst / page_size_ <= page_count_);
 
             // upsert each provided page
             int sofar = 0;
-            std::vector<char> pagebuf;
-            pagebuf.reserve(page_size_);
             while (sofar < iAmt) {
                 assert(!((iOfst + sofar) % page_size_));
                 assert(!((iAmt - sofar) % page_size_));
-                UpsertPage((iOfst + sofar) / page_size_, (uint8_t *)zBuf + sofar, pagebuf);
+                UpsertPage((iOfst + sofar) / page_size_, (uint8_t *)zBuf + sofar);
                 sofar += page_size_;
             }
             assert(sofar == iAmt);
@@ -294,50 +378,6 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             _DBG << exn.what() << _EOL;
             page_count_ = 0; // to be redetected
             return SQLITE_IOERR_WRITE;
-        }
-    }
-
-    void AppendBlankPages(int n) {
-        try {
-            std::string blank_page(page_size_, 0);
-            std::vector<char> pagebuf(page_size_);
-            for (sqlite3_int64 i = 0; i < n; ++i) {
-                insert_page_->clearBindings();
-                EncodePage(page_count_, blank_page.data(), pagebuf, *insert_page_);
-                insert_page_->bind(4, (sqlite3_int64)page_count_);
-                StatementResetter resetter(*insert_page_);
-                if (insert_page_->exec() != 1) {
-                    throw SQLite::Exception("unexpected result from blank page append",
-                                            SQLITE_IOERR_WRITE);
-                }
-                page_count_++;
-            }
-        } catch (std::exception &exn) {
-            _DBG << exn.what() << _EOL;
-            page_count_ = 0; // to be redetected
-            throw;
-        }
-    }
-
-    void UpsertPage(sqlite_int64 page_idx, const void *page, std::vector<char> &pagebuf) {
-        assert(page_idx <= page_count_);
-        try {
-            auto &stmt = page_idx < page_count_ ? update_page_ : insert_page_;
-            stmt->clearBindings();
-            EncodePage(page_idx, page, pagebuf, *stmt);
-            stmt->bind(4, page_idx);
-            StatementResetter resetter(*stmt);
-            if (stmt->exec() != 1) {
-                throw SQLite::Exception("unexpected result from page upsert " +
-                                            std::to_string(page_idx),
-                                        SQLITE_IOERR_WRITE);
-            }
-            page_count_ += page_idx < page_count_ ? 0 : 1;
-            pages_written_++;
-        } catch (std::exception &exn) {
-            _DBG << exn.what() << _EOL;
-            page_count_ = 0; // to be redetected
-            throw;
         }
     }
 
