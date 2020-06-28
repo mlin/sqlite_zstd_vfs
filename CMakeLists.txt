@@ -32,11 +32,11 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(nested_vfs SHARED src/nested_vfs.cc src/SQLiteNestedVFS.h src/SQLiteVFS.h)
+add_library(nested_vfs SHARED src/nested_vfs.cc src/SQLiteNestedVFS.h src/SQLiteVFS.h src/ThreadPool.h)
 SET_TARGET_PROPERTIES(nested_vfs PROPERTIES PREFIX "")
 target_link_libraries(nested_vfs PRIVATE SQLiteCpp)
 
-add_library(zstd_vfs SHARED src/zstd_vfs.cc src/SQLiteNestedVFS.h src/SQLiteVFS.h src/zstd_vfs.h)
+add_library(zstd_vfs SHARED src/zstd_vfs.cc src/SQLiteNestedVFS.h src/SQLiteVFS.h src/zstd_vfs.h src/ThreadPool.h)
 SET_TARGET_PROPERTIES(zstd_vfs PROPERTIES PREFIX "")
 target_link_libraries(zstd_vfs PRIVATE SQLiteCpp zstd)
 
@@ -49,7 +49,7 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     FetchContent_MakeAvailable(catch)
     include_directories(${catch_SOURCE_DIR}/single_include)
 
-    add_executable(test_exe test/test.cc test/test_vfstrace.c src/SQLiteNestedVFS.h src/SQLiteVFS.h)
+    add_executable(test_exe test/test.cc test/test_vfstrace.c src/SQLiteNestedVFS.h src/SQLiteVFS.h src/ThreadPool.h)
     target_link_libraries(test_exe PRIVATE SQLiteCpp)
 
     include(CTest)

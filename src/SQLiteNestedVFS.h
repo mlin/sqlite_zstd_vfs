@@ -11,10 +11,10 @@
 
 #include "SQLiteCpp/SQLiteCpp.h"
 #include "SQLiteVFS.h"
+#include "ThreadPool.h"
 #include <cstdint>
 #include <libgen.h>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -128,11 +128,14 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         memcpy(dest, data.getBlob(), page_size_);
     }
 
+    ThreadPool thread_pool_;
+
     // holds state of page-encoding background job
     struct EncodeJob {
         // job inputs
         sqlite3_int64 page_idx = -1;
         std::string page;
+        bool insert = false;
 
         // job outputs
         sqlite3_int64 meta1, meta2;
@@ -154,12 +157,10 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     virtual std::unique_ptr<EncodeJob> NewEncodeJob() {
         return std::unique_ptr<EncodeJob>(new EncodeJob);
     }
-    // pool of EncodeJob instances, to minimize allocations
-    std::vector<std::unique_ptr<EncodeJob>> encode_job_pool_;
-    std::mutex encode_job_pool_mutex_;
     virtual void InitEncodeJob(EncodeJob &job, sqlite3_int64 page_idx, const void *page_data) {
         // Initialize job in main thread
         job.page_idx = page_idx;
+        job.insert = page_idx == page_count_;
         if (page_data) {
             // copy page data for background-encoding
             job.page.assign((const char *)page_data, page_size_);
@@ -173,12 +174,19 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         job.errmsg.clear();
     }
 
-    void UpsertPage(sqlite_int64 page_idx, const void *page) {
+    // pool of EncodeJob instances, to minimize allocations
+    std::vector<std::unique_ptr<EncodeJob>> encode_job_pool_;
+    std::mutex encode_job_pool_mutex_;
+
+    std::string upsert_errmsg_;
+
+    // enqueue page encoding+upsert on thread pool
+    void EnqueueUpsert(sqlite_int64 page_idx, const void *page) {
         assert(page_idx <= page_count_);
         try {
             std::unique_ptr<EncodeJob> job;
             {
-                // fetch from pool
+                // fetch from buffer pool
                 std::lock_guard<std::mutex> lock(encode_job_pool_mutex_);
                 if (!encode_job_pool_.empty()) {
                     encode_job_pool_.back().swap(job);
@@ -190,8 +198,31 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 NewEncodeJob().swap(job);
             }
             InitEncodeJob(*job, page_idx, page);
-            job->Execute();
-            auto &upsert = page_idx < page_count_ ? update_page_ : insert_page_;
+            page_count_ += job->insert ? 1 : 0;
+            // use ThreadPool to run encoding jobs in parallel and upsert jobs serially
+            thread_pool_.Enqueue(
+                job.release(),
+                [](void *job) {
+                    ((EncodeJob *)job)->Execute();
+                    return job;
+                },
+                [this](void *job) { this->ExecuteUpsert((EncodeJob *)job); });
+
+        } catch (std::exception &exn) {
+            _DBG << exn.what() << _EOL;
+            page_count_ = 0; // to be redetected
+            throw;
+        }
+    }
+
+    // perform upsert operation in worker thread; ThreadPool runs these serially in enqueued order
+    void ExecuteUpsert(EncodeJob *pjob) {
+        std::unique_ptr<EncodeJob> job(pjob);
+        try {
+            if (!job->errmsg.empty()) {
+                throw std::runtime_error(job->errmsg);
+            }
+            auto &upsert = job->insert ? insert_page_ : update_page_;
             upsert->clearBindings();
             upsert->bindNoCopy(1, job->encoded_page, job->encoded_page_size);
             if (!job->meta1null) {
@@ -203,20 +234,31 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             upsert->bind(4, job->page_idx);
             StatementResetter resetter(*upsert);
             if (upsert->exec() != 1) {
-                throw SQLite::Exception("unexpected result from page upsert " +
-                                            std::to_string(page_idx),
-                                        SQLITE_IOERR_WRITE);
+                throw std::runtime_error("unexpected result from page upsert");
             }
+
             {
-                // return to pool
+                // return to buffer pool
                 std::lock_guard<std::mutex> lock(encode_job_pool_mutex_);
                 encode_job_pool_.emplace_back(job.release());
             }
-            page_count_ += page_idx < page_count_ ? 0 : 1;
         } catch (std::exception &exn) {
-            _DBG << exn.what() << _EOL;
-            page_count_ = 0; // to be redetected
-            throw;
+            std::string errmsg =
+                std::string("background page encoding/upsert failed: ") + exn.what();
+            _DBG << errmsg << _EOL;
+            if (upsert_errmsg_.empty()) {
+                upsert_errmsg_ = errmsg;
+            }
+        }
+    }
+
+    // wait for background upserts to complete + raise any error message
+    void FinishUpserts(bool ignore_error = false) {
+        thread_pool_.Drain();
+        if (!ignore_error && !upsert_errmsg_.empty()) {
+            std::string errmsg = upsert_errmsg_;
+            upsert_errmsg_.clear();
+            throw SQLite::Exception(errmsg, SQLITE_IOERR_WRITE);
         }
     }
 
@@ -228,7 +270,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     int Close() override {
         if (!read_only_) {
             int rc;
-            if ((rc = Sync(0)) != 0) {
+            if ((rc = Sync(0)) != 0) { // includes FinishUpserts
                 return rc;
             }
             try {
@@ -254,6 +296,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             if (iAmt == 0) {
                 return SQLITE_OK;
             }
+            FinishUpserts();
             if (!DetectPageSize()) { // file is empty
                 memset(zBuf, 0, iAmt);
                 return iAmt > 0 ? SQLITE_IOERR_SHORT_READ : SQLITE_OK;
@@ -361,7 +404,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             begin();
             while (iOfst / page_size_ > DetectPageCount()) {
                 // write past current EOF; fill "hole" with zeroes
-                UpsertPage((sqlite3_int64)page_count_, nullptr);
+                EnqueueUpsert((sqlite3_int64)page_count_, nullptr);
             }
 
             // upsert each provided page
@@ -369,13 +412,14 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             while (sofar < iAmt) {
                 assert(!((iOfst + sofar) % page_size_));
                 assert(!((iAmt - sofar) % page_size_));
-                UpsertPage((iOfst + sofar) / page_size_, (uint8_t *)zBuf + sofar);
+                EnqueueUpsert((iOfst + sofar) / page_size_, (uint8_t *)zBuf + sofar);
                 sofar += page_size_;
             }
             assert(sofar == iAmt);
             return SQLITE_OK;
         } catch (std::exception &exn) {
             _DBG << exn.what() << _EOL;
+            FinishUpserts(true);
             page_count_ = 0; // to be redetected
             return SQLITE_IOERR_WRITE;
         }
@@ -384,6 +428,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     int Truncate(sqlite3_int64 size) override {
         assert(!read_only_);
         try {
+            FinishUpserts();
             if (!DetectPageSize()) {
                 return size == 0 ? SQLITE_OK : SQLITE_IOERR_TRUNCATE;
             }
@@ -416,6 +461,13 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     int Sync(int flags) override {
         assert(!read_only_);
         try {
+            FinishUpserts();
+        } catch (std::exception &exn) {
+            _DBG << exn.what() << _EOL;
+            page_count_ = 0; // to be redetected
+            return SQLITE_IOERR_WRITE;
+        }
+        try {
             if (txn_) {
                 txn_->commit();
                 txn_.reset();
@@ -430,9 +482,11 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
     int FileSize(sqlite3_int64 *pSize) override {
         try {
+            FinishUpserts();
             *pSize = DetectPageSize() * DetectPageCount();
             return SQLITE_OK;
         } catch (std::exception &exn) {
+            _DBG << exn.what() << _EOL;
             return SQLITE_IOERR;
         }
     }
@@ -501,7 +555,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                         "SELECT * FROM " + inner_db_tablename_prefix_ +
                             "pages WHERE page_idx >= ? AND page_idx < ? ORDER BY page_idx"),
           select_page_count_(*outer_db_, "SELECT COUNT(page_idx), SUM(page_idx) FROM " +
-                                             inner_db_tablename_prefix_ + "pages") {
+                                             inner_db_tablename_prefix_ + "pages"),
+          thread_pool_(8, 16) {
         methods_.iVersion = 1;
         assert(outer_db_->execAndGet("PRAGMA quick_check").getString() == "ok");
     }
