@@ -65,7 +65,7 @@ class ThreadPool {
             }
             {
                 // enqueue serial stage
-                std::lock_guard<std::mutex> ser_lock(ser_mutex_);
+                std::unique_lock<std::mutex> ser_lock(ser_mutex_);
                 ser_queue_.push(job);
                 // run the enqueued serial stage(s) so long as the next one is in seqno order.
                 // this may or may not include the one just enqueued.
@@ -76,7 +76,11 @@ class ThreadPool {
                     }
                     ser_queue_.pop();
                     if (job.ser) {
+                        // run the next serial stage; we can release ser_lock for this because the
+                        // seqno check ensures only one can be dequeued at a time.
+                        ser_lock.unlock();
                         job.ser(job.x);
+                        ser_lock.lock();
                     }
                     ++seqno_done_;
                 }
@@ -95,8 +99,8 @@ class ThreadPool {
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
             shutdown_ = true;
+            cv_enqueue_.notify_all();
         }
-        cv_enqueue_.notify_all();
         for (auto &thread : threads_) {
             thread.join();
         }
@@ -118,7 +122,6 @@ class ThreadPool {
         if (threads_.size() < max_threads_ && threads_.size() < par_queue_.size()) {
             threads_.emplace_back([this]() { this->Worker(); });
         }
-        lock.unlock();
         cv_enqueue_.notify_one();
     }
 

@@ -557,7 +557,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                             "pages WHERE page_idx >= ? AND page_idx < ? ORDER BY page_idx"),
           select_page_count_(*outer_db_, "SELECT COUNT(page_idx), SUM(page_idx) FROM " +
                                              inner_db_tablename_prefix_ + "pages"),
-          thread_pool_(threads, threads * 2) {
+          thread_pool_(threads, threads * 3) {
         methods_.iVersion = 1;
         assert(outer_db_->execAndGet("PRAGMA quick_check").getString() == "ok");
     }

@@ -93,16 +93,16 @@ Here are some operation timings using a [1,195MiB TPC-H database](https://github
 
 |    | db file size | bulk load<sup>1</sup> | Query 1 | Query 8 |
 | -- | --: | --: | --: | --: |
-| SQLite defaults | 1182MiB | 4.6s | 8.8s | 4.4s |
-| zstd_vfs defaults | 647MiB | 23.0s | 11.3s | 47.3s |
-| zstd_vfs tuned<sup>2</sup> | 500MiB | 16.4s | 11.1s | 7.7s |
+| SQLite defaults | 1182MiB | 4.5s | 8.2s | 4.2s |
+| zstd_vfs defaults | 647MiB | 22.9s | 11.4s | 45.9s |
+| zstd_vfs tuned<sup>2</sup> | 500MiB | 15.5s | 10.8s | 7.5s |
 
 <sup>1</sup> by VACUUM INTO<br/>
 <sup>2</sup> `&level=6&threads=8&outer_page_size=16384&outer_unsafe=true`; [`PRAGMA page_size=8192`](https://www.sqlite.org/pragma.html#pragma_page_size); [`PRAGMA cache_size=-102400`](https://www.sqlite.org/pragma.html#pragma_cache_size)
 
 Query 1 is an aggregation satisfied by one table scan. Decompression slows it down by ~25% while the database file shrinks by 50-60%. (Each query starts with a hot filesystem cache and cold database page cache.)
 
-Query 8 is an [historically influential](https://www.sqlite.org/queryplanner-ng.html) eight-way join. SQLite's default ~2MB page cache is too small for its access pattern, leading to a disastrous slowdown from repeated page decompression; but this problem is largely solved by increasing the cache to 100MiB. Evidently, we should prefer a much larger page cache in view of the increased cost to miss.
+Query 8 is an [historically influential](https://www.sqlite.org/queryplanner-ng.html) eight-way join. SQLite's default ~2MB page cache is too small for its access pattern, leading to a disastrous slowdown from repeated page decompression; but simply increasing the page cache to 100MiB largely solves this problem. Evidently, we should prefer a much larger page cache in view of the increased cost to miss.
 
 ## Tuning
 
