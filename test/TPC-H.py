@@ -63,6 +63,9 @@ def main():
     parser.add_argument("--cache-MiB", type=int, help="SQLite page cache size (default ~2)")
     parser.add_argument("--level", type=int, help="zstd compression level (default 3)", default=3)
     parser.add_argument(
+        "--threads", type=int, help="background compression threads (default 1)", default=1
+    )
+    parser.add_argument(
         "--inner-page-KiB",
         type=int,
         help="inner db page size (before compression; default 4)",
@@ -73,11 +76,11 @@ def main():
     )
     args = parser.parse_args(sys.argv[1:])
 
-    ans = run(args.cache_MiB, args.level, args.inner_page_KiB, args.outer_page_KiB)
+    ans = run(args.cache_MiB, args.level, args.threads, args.inner_page_KiB, args.outer_page_KiB)
     print(json.dumps(ans, indent=2))
 
 
-def run(cache_MiB, level, inner_page_KiB, outer_page_KiB):
+def run(cache_MiB, level, threads, inner_page_KiB, outer_page_KiB):
     # download db to /tmp/TPC-H.db; --continue=true avoids re-download
     subprocess.run(
         f"aria2c -x 10 -j 10 -s 10 --file-allocation=none --continue=true {DB_URL} >&2",
@@ -126,7 +129,7 @@ def run(cache_MiB, level, inner_page_KiB, outer_page_KiB):
     with timer(timings, "load_zstd"):
         con.execute(f"PRAGMA page_size={1024*inner_page_KiB}")
         con.execute(
-            f"VACUUM INTO 'file:/tmp/TPC-H.zstd.db?vfs=zstd&outer_unsafe=true&outer_page_size={1024*outer_page_KiB}&level={level}&threads=-1'"
+            f"VACUUM INTO 'file:/tmp/TPC-H.zstd.db?vfs=zstd&outer_unsafe=true&outer_page_size={1024*outer_page_KiB}&level={level}&threads={threads}'"
         )
         con.close()
     timings["db_size"] = os.path.getsize("/tmp/TPC-H.vacuum.db")

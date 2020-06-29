@@ -1,19 +1,17 @@
 # sqlite_zstd_vfs
 
-This [SQLite VFS extension](https://www.sqlite.org/vfs.html) provides read/write [Zstandard](https://facebook.github.io/zstd/) compression. It compresses [pages of the main database file](https://www.sqlite.org/fileformat.html) as they're written to storage, and later decompresses them as they're read out. As the database grows, it uses the [dictionary](https://github.com/facebook/zstd#the-case-for-small-data-compression) feature to increase & speed up compression of future pages.
+This [SQLite VFS extension](https://www.sqlite.org/vfs.html) provides streaming storage compression with [Zstandard](https://facebook.github.io/zstd/), compressing [pages of the main database file](https://www.sqlite.org/fileformat.html) as they're written out, and later decompressing them as they're read in. It runs page compression on background threads and occasionaly generates [dictionaries](https://github.com/facebook/zstd#the-case-for-small-data-compression) to improve subsequent compression.
 
 Compressed page storage operates similarly to the [design of ZIPVFS](https://sqlite.org/zipvfs/doc/trunk/www/howitworks.wiki), the SQLite developers' proprietary extension. Because we're not as familiar with the internal "pager" module, we use a full-fledged SQLite database as the bottom-most layer. Where SQLite would write database page #P at offset P × page_size in the disk file, instead we `INSERT INTO outer_page_table(rowid,data) VALUES(P,compressed_inner_page)`, and later `SELECT data FROM outer_page_table WHERE rowid=P`. *You mustn't be afraid to dream a little bigger...*
 
-**USE AT YOUR OWN RISK:** we've not yet prioritized testing for all-hazards transaction safety (although we do believe the design is sound). This project is *not* associated with the SQLite dev team.
+**USE AT YOUR OWN RISK:** we've not yet prioritized testing for all-hazards transaction safety (although we do believe the design is sound). This project is not associated with the SQLite developers.
 
 ## Quick start
 
 Prerequisites:
 
 * C++11 compiler, CMake >= 3.11
-* *Up-to-date* packages for SQLite3 and Zstandard development
-  * e.g. Ubuntu 20.04 `sqlite3 libsqlite3-dev libzstd-dev`
-  * Depends on recent features/improvements (e.g. [VACUUM INTO](https://www.i-programmer.info/news/84-database/12532-sqlite-introduces-vacuum-into.html), [zstd seekable](https://github.com/facebook/zstd/tree/dev/contrib/seekable_format))
+* *Up-to-date* packages for SQLite3 and Zstandard development, e.g. Ubuntu 20.04 `sqlite3 libsqlite3-dev libzstd-dev`
 
 Fetch source code and compile the [SQLite loadable extension](https://www.sqlite.org/loadext.html):
 
@@ -95,18 +93,16 @@ Here are some operation timings using a [1,195MiB TPC-H database](https://github
 
 |    | db file size | bulk load<sup>1</sup> | Query 1 | Query 8 |
 | -- | --: | --: | --: | --: |
-| SQLite defaults | 1182MiB | 5.4s | 9.4s | 6.9s |
-| zstd_vfs defaults | 647MiB | 26.2s | 11.7s | 53.1s |
-| zstd_vfs tuned<sup>2</sup> | 485MiB | 77.5s | 10.8s | 8.4s |
+| SQLite defaults | 1182MiB | 4.6s | 8.8s | 4.4s |
+| zstd_vfs defaults | 647MiB | 23.0s | 11.3s | 47.3s |
+| zstd_vfs tuned<sup>2</sup> | 500MiB | 16.4s | 11.1s | 7.7s |
 
 <sup>1</sup> by VACUUM INTO<br/>
-<sup>2</sup> `&level=8&outer_page_size=16384&outer_unsafe=true`; [`PRAGMA page_size=8192`](https://www.sqlite.org/pragma.html#pragma_page_size); [`PRAGMA cache_size=-102400`](https://www.sqlite.org/pragma.html#pragma_cache_size)
+<sup>2</sup> `&level=6&threads=8&outer_page_size=16384&outer_unsafe=true`; [`PRAGMA page_size=8192`](https://www.sqlite.org/pragma.html#pragma_page_size); [`PRAGMA cache_size=-102400`](https://www.sqlite.org/pragma.html#pragma_cache_size)
 
-Query 1 is an aggregation satisfied by one table scan. Decompression slows it down by 15-25% while the database file shrinks by 45-60%. (Each query starts with a hot filesystem cache and cold database page cache.)
+Query 1 is an aggregation satisfied by one table scan. Decompression slows it down by ~25% while the database file shrinks by 50-60%. (Each query starts with a hot filesystem cache and cold database page cache.)
 
-Query 8 is an [historically influential](https://www.sqlite.org/queryplanner-ng.html) eight-way join. SQLite's default ~2MB page cache is too small for its access pattern, leading to a disastrous slowdown from repeated page decompression. Fortunately, increasing the cache to 100MiB largely solves this. Evidently, we should prefer a much larger page cache in view of the increased cost to miss.
-
-It should be possible to parallelize the bulk load compression on background threads. Watch this space...
+Query 8 is an [historically influential](https://www.sqlite.org/queryplanner-ng.html) eight-way join. SQLite's default ~2MB page cache is too small for its access pattern, leading to a disastrous slowdown from repeated page decompression; but this problem is largely solved by increasing the cache to 100MiB. Evidently, we should prefer a much larger page cache in view of the increased cost to miss.
 
 ## Tuning
 
@@ -118,7 +114,7 @@ Some parameters are controlled from the file URI's query string opening the data
 | reading/decompression | <ul><li>outer_cache_size</li></ul> | <ul><li>cache_size</li></ul> |
 
 * **&level=3**: Zstandard compression level for newly written pages (-7 to 22)
-* **&threads=1**: background compression threads (negative: match available hardware)
+* **&threads=1**: background compression threads (-1 to match host processors)
 * **&outer_page_size=4096**: page size for the newly-created outer database; suggest doubling the (inner) page_size, to reduce space overhead from packing the compressed inner pages
 * **&outer_unsafe=false**: set true to speed up bulk load by disabling transaction safety for outer database (app crash easily causes corruption)
 
@@ -130,6 +126,6 @@ Some parameters are controlled from the file URI's query string opening the data
 
 * **PRAGMA cache_size=-2000**: page cache size for inner database, in [PRAGMA cache_size](https://www.sqlite.org/pragma.html#pragma_cache_size) units. Critical for complex query performance, as illustrated above.
 
-For bulk load, open the database with `&outer_unsafe=true` and also issue `PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF`. Then insert everything within one big transaction.
+For bulk load, open the database with the `&outer_unsafe=true` URI parameter and `SQLITE_OPEN_NOMUTEX` flag, then issue `PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF`. Insert everything within one big transaction, create any needed indices, and commit.
 
-`VACUUM INTO 'file:fresh_copy.db?vfs=zstd'` is a suggested way to [defragment](https://www.sqlite.org/lang_vacuum.html) a database that's been heavily modified over time.
+`VACUUM INTO 'file:fresh_copy.db?vfs=zstd'` (+ URI parameters above) is a suggested way to [defragment](https://www.sqlite.org/lang_vacuum.html) a database that's been heavily modified over time.
