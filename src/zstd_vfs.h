@@ -14,6 +14,7 @@
 #include "SQLiteNestedVFS.h"
 #include "zdict.h"
 #include "zstd.h"
+#include <chrono>
 #include <map>
 #include <random>
 #include <set>
@@ -138,6 +139,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
         }
 
         if (cur_dict_ < 0) {
+            FinishUpserts();
             // start off with the newest dict stored in the database, if any
             if (!last_dict_id_) {
                 last_dict_id_.reset(
@@ -156,7 +158,9 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
 
         if (cur_dict_ < 0 ||
             std::max(page_count_, cur_dict_pages_written_) >= 3 * cur_dict_page_count_) {
-            // time to create a new dict
+            // time to create a new dict. TODO: run as background job
+            FinishUpserts();
+            auto t0 = std::chrono::high_resolution_clock::now();
 
             sqlite_int64 i;
             // fetch random pages
@@ -218,7 +222,10 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             cur_dict_ = dict_id;
             cur_dict_page_count_ = dict_page_count;
             cur_dict_pages_written_ = 0;
-            _DBG << "dict " << dict_id << " @ " << dict_page_count << _EOL;
+            std::chrono::duration<double, std::milli> t =
+                std::chrono::high_resolution_clock::now() - t0;
+            _DBG << "dict " << dict_id << " @ " << dict_page_count << " " << t.count() << "ms"
+                 << _EOL;
         }
     }
 
@@ -264,7 +271,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
                 ZSTD_freeCCtx(cctx);
             }
         }
-        void Execute() override {
+        void Execute() noexcept override {
             // Execute the job, possibly on a worker thread
             if (page_idx > 0) {
                 size_t capacity = ZSTD_compressBound(page.size());
@@ -309,7 +316,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
         if (!job.cctx && !(job.cctx = ZSTD_createCCtx())) {
             throw SQLite::Exception("ZSTD_createCCtx", SQLITE_NOMEM);
         }
-        UpdateCurDict(); // TODO: barrier background jobs
+        UpdateCurDict();
         if (cur_dict_ >= 0) {
             job.dict_id = cur_dict_;
             job.cdict = EnsureDictCached(cur_dict_).ensure_cdict();

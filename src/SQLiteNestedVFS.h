@@ -123,7 +123,10 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     virtual void DecodePage(sqlite3_int64 page_idx, const SQLite::Column &data,
                             const SQLite::Column &meta1, const SQLite::Column &meta2, void *dest) {
         if (!data.isBlob() || data.getBytes() != page_size_) {
-            throw SQLite::Exception("inconsistent page sizes", SQLITE_CORRUPT);
+            std::string errmsg = "page " + std::to_string(page_idx) +
+                                 " size = " + std::to_string(data.getBytes()) +
+                                 " expected = " + std::to_string(page_size_);
+            throw SQLite::Exception(errmsg, SQLITE_CORRUPT);
         }
         memcpy(dest, data.getBlob(), page_size_);
     }
@@ -146,7 +149,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         std::string errmsg;
 
         virtual ~EncodeJob() = default;
-        virtual void Execute() {
+        virtual void Execute() noexcept {
             // Execute the job, possibly on a worker thread; for subclass to override
             encoded_page = page.data();
             encoded_page_size = page.size();
@@ -202,11 +205,11 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             // use ThreadPool to run encoding jobs in parallel and upsert jobs serially
             thread_pool_.Enqueue(
                 job.release(),
-                [](void *job) {
+                [](void *job) noexcept {
                     ((EncodeJob *)job)->Execute();
                     return job;
                 },
-                [this](void *job) { this->ExecuteUpsert((EncodeJob *)job); });
+                [this](void *job) noexcept { this->ExecuteUpsert((EncodeJob *)job); });
 
         } catch (std::exception &exn) {
             _DBG << exn.what() << _EOL;
@@ -216,7 +219,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     }
 
     // perform upsert operation in worker thread; ThreadPool runs these serially in enqueued order
-    void ExecuteUpsert(EncodeJob *pjob) {
+    void ExecuteUpsert(EncodeJob *pjob) noexcept {
         std::unique_ptr<EncodeJob> job(pjob);
         try {
             if (!job->errmsg.empty()) {
@@ -254,11 +257,9 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
     // wait for background upserts to complete + raise any error message
     void FinishUpserts(bool ignore_error = false) {
-        thread_pool_.Drain();
+        thread_pool_.Barrier();
         if (!ignore_error && !upsert_errmsg_.empty()) {
-            std::string errmsg = upsert_errmsg_;
-            upsert_errmsg_.clear();
-            throw SQLite::Exception(errmsg, SQLITE_IOERR_WRITE);
+            throw SQLite::Exception(upsert_errmsg_, SQLITE_IOERR_WRITE);
         }
     }
 
@@ -622,8 +623,8 @@ class VFS : public SQLiteVFS::Wrapper {
 
                 try {
                     // open outer database
-                    std::unique_ptr<SQLite::Database> outer_db(
-                        new SQLite::Database(outer_db_filename, flags, 0, outer_vfs_));
+                    std::unique_ptr<SQLite::Database> outer_db(new SQLite::Database(
+                        outer_db_filename, flags | SQLITE_OPEN_NOMUTEX, 0, outer_vfs_));
                     // need exclusive locking mode to protect InnerDatabaseFile::page_count_; see
                     // discussion in Lock()
                     outer_db->exec("PRAGMA locking_mode=EXCLUSIVE");
