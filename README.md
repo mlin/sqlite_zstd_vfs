@@ -114,10 +114,11 @@ Some parameters are controlled from the file URI's query string opening the data
 
 |   | URI query parameters | PRAGMA |
 | -- | -- | -- |
-| writing/compression | <ul><li>level</li><li>outer_page_size</li><li>outer_unsafe</li></ul> | <ul><li>page_size</li><li>auto_vacuum</li><li>journal_mode</li></ul> |
+| writing/compression | <ul><li>level</li><li>threads</li><li>outer_page_size</li><li>outer_unsafe</li></ul> | <ul><li>page_size</li><li>auto_vacuum</li><li>journal_mode</li></ul> |
 | reading/decompression | <ul><li>outer_cache_size</li></ul> | <ul><li>cache_size</li></ul> |
 
 * **&level=3**: Zstandard compression level for newly written pages (-7 to 22)
+* **&threads=1**: background compression threads (negative: match available hardware)
 * **&outer_page_size=4096**: page size for the newly-created outer database; suggest doubling the (inner) page_size, to reduce space overhead from packing the compressed inner pages
 * **&outer_unsafe=false**: set true to speed up bulk load by disabling transaction safety for outer database (app crash easily causes corruption)
 

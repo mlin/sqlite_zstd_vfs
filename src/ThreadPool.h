@@ -1,9 +1,9 @@
 // Worker thread pool:
-// 1. Each job has one stage that can run in parallel, followed by a serial stage to run
-//    exclusively of other jobs' serial stages in the enqueued order. Put another way, the data
-//    flows through a parallel scatter and serial gather.
+// 1. Each job has one stage that can run in parallel, followed by a serial stage to be run in the
+//    enqueued order, exclusively of other jobs' serial stages. Put another way, the data flow
+//    through a parallel scatter, then a serial gather.
 // 2. The jobs have no return values, relying instead on side-effects. (Exception: for each job,
-//    the parallel stage result passes a result to its serialized stage.)
+//    the parallel stage passes a void* to its serialized stage.)
 // 3. The Enqueue operation blocks if the queue is "full"
 
 #pragma once
@@ -102,7 +102,7 @@ class ThreadPool {
         }
     }
 
-    // Enqueue ser(par(x)) for background processing as described. The functions must not raise.
+    // Enqueue ser(par(x)) for background processing as described. The functions must not throw.
     void Enqueue(void *x, std::function<void *(void *) noexcept> par,
                  std::function<void(void *) noexcept> ser) {
         std::unique_lock<std::mutex> lock(state_mutex_);

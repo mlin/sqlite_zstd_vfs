@@ -549,7 +549,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
   public:
     InnerDatabaseFile(std::unique_ptr<SQLite::Database> &&outer_db,
-                      const std::string &inner_db_tablename_prefix, bool read_only)
+                      const std::string &inner_db_tablename_prefix, bool read_only, size_t threads)
         : outer_db_(std::move(outer_db)), inner_db_tablename_prefix_(inner_db_tablename_prefix),
           read_only_(read_only),
           select_pages_(*outer_db_,
@@ -557,7 +557,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                             "pages WHERE page_idx >= ? AND page_idx < ? ORDER BY page_idx"),
           select_page_count_(*outer_db_, "SELECT COUNT(page_idx), SUM(page_idx) FROM " +
                                              inner_db_tablename_prefix_ + "pages"),
-          thread_pool_(8, 16) {
+          thread_pool_(threads, threads * 2) {
         methods_.iVersion = 1;
         assert(outer_db_->execAndGet("PRAGMA quick_check").getString() == "ok");
     }
@@ -600,9 +600,9 @@ class VFS : public SQLiteVFS::Wrapper {
 
     virtual std::unique_ptr<SQLiteVFS::File>
     NewInnerDatabaseFile(const char *zName, std::unique_ptr<SQLite::Database> &&outer_db,
-                         bool read_only) {
-        return std::unique_ptr<SQLiteVFS::File>(
-            new InnerDatabaseFile(std::move(outer_db), inner_db_tablename_prefix_, read_only));
+                         bool read_only, size_t threads) {
+        return std::unique_ptr<SQLiteVFS::File>(new InnerDatabaseFile(
+            std::move(outer_db), inner_db_tablename_prefix_, read_only, threads));
     }
 
     int Open(const char *zName, sqlite3_file *pFile, int flags, int *pOutFlags) override {
@@ -656,8 +656,17 @@ class VFS : public SQLiteVFS::Wrapper {
                         txn.commit();
                     }
 
-                    auto idbf = NewInnerDatabaseFile(zName, std::move(outer_db),
-                                                     (flags & SQLITE_OPEN_READONLY));
+                    auto threads = sqlite3_uri_int64(zName, "threads", 1);
+                    if (threads < 0) {
+                        threads = sqlite3_int64(std::thread::hardware_concurrency()) - 1;
+                    }
+                    if (threads < 1) {
+                        threads = 1;
+                    }
+
+                    auto idbf =
+                        NewInnerDatabaseFile(zName, std::move(outer_db),
+                                             (flags & SQLITE_OPEN_READONLY), (size_t)threads);
                     idbf->InitHandle(pFile);
                     assert(pFile->pMethods);
                     idbf.release();

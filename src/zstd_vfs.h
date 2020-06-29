@@ -333,12 +333,12 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
     static const size_t DEFAULT_DICT_SIZE_TARGET = 98304;
     ZstdInnerDatabaseFile(std::unique_ptr<SQLite::Database> &&outer_db,
                           const std::string &inner_db_tablename_prefix, bool read_only,
-                          bool enable_dict = true,
+                          size_t threads, bool enable_dict = true,
                           int compression_level = DEFAULT_COMPRESSION_LEVEL,
                           size_t dict_training_pages = DEFAULT_DICT_TRAINING_PAGES,
                           size_t dict_size_target = DEFAULT_DICT_SIZE_TARGET)
-        : SQLiteNested::InnerDatabaseFile(std::move(outer_db), inner_db_tablename_prefix,
-                                          read_only),
+        : SQLiteNested::InnerDatabaseFile(std::move(outer_db), inner_db_tablename_prefix, read_only,
+                                          threads),
           enable_dict_(enable_dict), compression_level_(compression_level),
           dict_training_pages_(dict_training_pages), dict_size_target_(dict_size_target) {}
 };
@@ -357,13 +357,13 @@ class ZstdVFS : public SQLiteNested::VFS {
 
     virtual std::unique_ptr<SQLiteVFS::File>
     NewInnerDatabaseFile(const char *zName, std::unique_ptr<SQLite::Database> &&outer_db,
-                         bool read_only) override {
+                         bool read_only, size_t threads) override {
         bool enable_dict = sqlite3_uri_boolean(zName, "dict", true);
         int compression_level =
             sqlite3_uri_int64(zName, "level", ZstdInnerDatabaseFile::DEFAULT_COMPRESSION_LEVEL);
         return std::unique_ptr<SQLiteVFS::File>(
             new ZstdInnerDatabaseFile(std::move(outer_db), inner_db_tablename_prefix_, read_only,
-                                      enable_dict, compression_level));
+                                      threads, enable_dict, compression_level));
     }
 
   public:

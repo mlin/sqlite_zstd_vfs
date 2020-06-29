@@ -126,7 +126,7 @@ def run(cache_MiB, level, inner_page_KiB, outer_page_KiB):
     with timer(timings, "load_zstd"):
         con.execute(f"PRAGMA page_size={1024*inner_page_KiB}")
         con.execute(
-            f"VACUUM INTO 'file:/tmp/TPC-H.zstd.db?vfs=zstd&outer_unsafe=true&outer_page_size={1024*outer_page_KiB}&level={level}'"
+            f"VACUUM INTO 'file:/tmp/TPC-H.zstd.db?vfs=zstd&outer_unsafe=true&outer_page_size={1024*outer_page_KiB}&level={level}&threads=-1'"
         )
         con.close()
     timings["db_size"] = os.path.getsize("/tmp/TPC-H.vacuum.db")
