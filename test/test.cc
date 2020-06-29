@@ -145,7 +145,7 @@ TEST_CASE("cellular_automata") {
     {
         SQLite::Database control(testdir + "/control",
                                  SQLite::OPEN_READWRITE | SQLite::OPEN_CREATE);
-        SQLite::Database experiment("file:" + testdir + "/experiment?vfs=nested",
+        SQLite::Database experiment("file:" + testdir + "/experiment?vfs=nested&threads=-1",
                                     SQLite::OPEN_READWRITE | SQLite::OPEN_CREATE |
                                         SQLite::OPEN_URI);
 

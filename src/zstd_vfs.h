@@ -14,6 +14,7 @@
 #include "SQLiteNestedVFS.h"
 #include "zdict.h"
 #include "zstd.h"
+#include <chrono>
 #include <map>
 #include <random>
 #include <set>
@@ -28,6 +29,7 @@
 
 class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
   protected:
+    using super = SQLiteNested::InnerDatabaseFile;
     std::default_random_engine R_;
 
     // false = disable use of dict for newly compressed pages
@@ -46,7 +48,6 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
 
     // zstd de/compression contexts
     std::shared_ptr<ZSTD_DCtx> dctx_;
-    std::shared_ptr<ZSTD_CCtx> cctx_;
 
     // in-memory cache of dict buffers and zstd de/compression dict structures, lazily populated
     struct dict_cache_entry {
@@ -138,6 +139,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
         }
 
         if (cur_dict_ < 0) {
+            FinishUpserts();
             // start off with the newest dict stored in the database, if any
             if (!last_dict_id_) {
                 last_dict_id_.reset(
@@ -156,7 +158,9 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
 
         if (cur_dict_ < 0 ||
             std::max(page_count_, cur_dict_pages_written_) >= 3 * cur_dict_page_count_) {
-            // time to create a new dict
+            // time to create a new dict. TODO: run as background job
+            FinishUpserts();
+            auto t0 = std::chrono::high_resolution_clock::now();
 
             sqlite_int64 i;
             // fetch random pages
@@ -218,7 +222,10 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             cur_dict_ = dict_id;
             cur_dict_page_count_ = dict_page_count;
             cur_dict_pages_written_ = 0;
-            _DBG << "dict " << dict_id << " @ " << dict_page_count << _EOL;
+            std::chrono::duration<double, std::milli> t =
+                std::chrono::high_resolution_clock::now() - t0;
+            _DBG << "dict " << dict_id << " @ " << dict_page_count << " " << t.count() << "ms"
+                 << _EOL;
         }
     }
 
@@ -253,47 +260,71 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
         }
     }
 
-    // Encode one page for storage as a blob in the outer db (page_size_ bytes in)
-    // Bind columns: 1=data, 2=meta1, 3=meta2
-    // pagebuf is scratch space, e.g. for use with upsert.bindNoCopy()
-    virtual void EncodePage(sqlite_int64 page_idx, const void *src, std::vector<char> &pagebuf,
-                            SQLite::Statement &upsert) override {
-        if (page_idx > 0) {
-            if (!cctx_) {
-                cctx_ = std::shared_ptr<ZSTD_CCtx>(ZSTD_createCCtx(), ZSTD_freeCCtx);
-                if (!cctx_) {
-                    throw SQLite::Exception("ZSTD_createCCtx", SQLITE_NOMEM);
-                }
-            }
-            UpdateCurDict();
+    struct CompressJob : super::EncodeJob {
+        std::vector<char> buffer;
+        ZSTD_CCtx *cctx = nullptr;
+        sqlite3_int64 dict_id = -1;
+        const ZSTD_CDict *cdict = nullptr;
 
-            size_t capacity = ZSTD_compressBound(page_size_);
-            pagebuf.resize(capacity);
-            size_t zrc;
-            if (enable_dict_ && cur_dict_ >= 0) {
-                zrc = ZSTD_compress_usingCDict(cctx_.get(), pagebuf.data(), capacity, src,
-                                               page_size_, dict_cache_[cur_dict_].ensure_cdict());
-                upsert.bind(2, cur_dict_);
-                cur_dict_pages_written_++;
-            } else {
-                // no dict yet; use fast setting (level -1) for first 100 pages
-                zrc = ZSTD_compressCCtx(cctx_.get(), pagebuf.data(), capacity, src, page_size_,
-                                        page_idx > DEFAULT_DICT_TRAINING_PAGES ? compression_level_
-                                                                               : -1);
-                upsert.bind(2, (sqlite3_int64)-1);
-            }
-            if (!ZSTD_isError(zrc) && zrc * 10 < 8 * page_size_) {
-                assert(zrc <= capacity);
-                upsert.bindNoCopy(1, pagebuf.data(), zrc);
-                return;
+        ~CompressJob() {
+            if (cctx) {
+                ZSTD_freeCCtx(cctx);
             }
         }
+        void Execute() noexcept override {
+            // Execute the job, possibly on a worker thread
+            if (page_idx > 0) {
+                size_t capacity = ZSTD_compressBound(page.size());
+                if (buffer.size() < capacity) {
+                    buffer.resize(capacity);
+                }
+                size_t zrc;
+                if (cdict) {
+                    assert(dict_id >= 0);
+                    zrc = ZSTD_compress_usingCDict(cctx, buffer.data(), buffer.size(), page.data(),
+                                                   page.size(), cdict);
+                    meta1 = dict_id;
+                } else {
+                    // no dict yet (first 100 pages); use fast setting (level -1)
+                    zrc = ZSTD_compressCCtx(cctx, buffer.data(), buffer.size(), page.data(),
+                                            page.size(), -1);
+                    meta1 = -1;
+                }
+                if (!ZSTD_isError(zrc) && zrc * 10 < 8 * page.size()) {
+                    assert(zrc <= buffer.size());
+                    meta1null = false;
+                    encoded_page = buffer.data();
+                    encoded_page_size = zrc;
+                    return;
+                }
+            }
 
-        // fall through: call super to copy page uncompressed. one of:
-        // - don't compress page_idx=0, as super looks at that to detect the db page size
-        // - compression judged to have failed (ratio < 20%)
-        upsert.bind(2); // meta1=NULL
-        SQLiteNested::InnerDatabaseFile::EncodePage(page_idx, src, pagebuf, upsert);
+            // fall through: call super to copy page uncompressed. one of:
+            // - don't compress page_idx=0, as super looks at that to detect the db page size
+            // - compression judged to have failed (ratio < 20%)
+            assert(meta1null);
+            super::EncodeJob::Execute();
+        }
+    };
+    std::unique_ptr<super::EncodeJob> NewEncodeJob() override {
+        return std::unique_ptr<super::EncodeJob>(new CompressJob);
+    }
+    void InitEncodeJob(super::EncodeJob &superjob, sqlite3_int64 page_idx,
+                       const void *page_data) override {
+        super::InitEncodeJob(superjob, page_idx, page_data);
+        auto &job = reinterpret_cast<CompressJob &>(superjob);
+        if (!job.cctx && !(job.cctx = ZSTD_createCCtx())) {
+            throw SQLite::Exception("ZSTD_createCCtx", SQLITE_NOMEM);
+        }
+        UpdateCurDict();
+        if (cur_dict_ >= 0) {
+            job.dict_id = cur_dict_;
+            job.cdict = EnsureDictCached(cur_dict_).ensure_cdict();
+            cur_dict_pages_written_++;
+        } else {
+            job.dict_id = -1;
+            job.cdict = nullptr;
+        }
     }
 
   public:
@@ -302,12 +333,12 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
     static const size_t DEFAULT_DICT_SIZE_TARGET = 98304;
     ZstdInnerDatabaseFile(std::unique_ptr<SQLite::Database> &&outer_db,
                           const std::string &inner_db_tablename_prefix, bool read_only,
-                          bool enable_dict = true,
+                          size_t threads, bool enable_dict = true,
                           int compression_level = DEFAULT_COMPRESSION_LEVEL,
                           size_t dict_training_pages = DEFAULT_DICT_TRAINING_PAGES,
                           size_t dict_size_target = DEFAULT_DICT_SIZE_TARGET)
-        : SQLiteNested::InnerDatabaseFile(std::move(outer_db), inner_db_tablename_prefix,
-                                          read_only),
+        : SQLiteNested::InnerDatabaseFile(std::move(outer_db), inner_db_tablename_prefix, read_only,
+                                          threads),
           enable_dict_(enable_dict), compression_level_(compression_level),
           dict_training_pages_(dict_training_pages), dict_size_target_(dict_size_target) {}
 };
@@ -326,13 +357,13 @@ class ZstdVFS : public SQLiteNested::VFS {
 
     virtual std::unique_ptr<SQLiteVFS::File>
     NewInnerDatabaseFile(const char *zName, std::unique_ptr<SQLite::Database> &&outer_db,
-                         bool read_only) override {
+                         bool read_only, size_t threads) override {
         bool enable_dict = sqlite3_uri_boolean(zName, "dict", true);
         int compression_level =
             sqlite3_uri_int64(zName, "level", ZstdInnerDatabaseFile::DEFAULT_COMPRESSION_LEVEL);
         return std::unique_ptr<SQLiteVFS::File>(
             new ZstdInnerDatabaseFile(std::move(outer_db), inner_db_tablename_prefix_, read_only,
-                                      enable_dict, compression_level));
+                                      threads, enable_dict, compression_level));
     }
 
   public:
