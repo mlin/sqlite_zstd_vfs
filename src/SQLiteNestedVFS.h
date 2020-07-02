@@ -72,7 +72,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     virtual size_t DetectPageSize() {
         if (!page_size_) {
             StatementResetter resetter(select_pages_);
-            select_pages_.bind(1, 0);
+            select_pages_.bind(1, 1);
             select_pages_.bind(2, 1);
             if (select_pages_.executeStep()) {
                 assert(select_pages_.getColumnCount() >= 2);
@@ -115,19 +115,18 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     }
 
     bool VerifyPageCount() {
-        // integrity check: page indices are sequential [0-page_count_).
-        sqlite3_int64 page_idx_sum =
-            outer_db_
-                ->execAndGet("SELECT SUM(page_idx) FROM " + inner_db_tablename_prefix_ + "pages")
+        // integrity check: page indices are sequential [1..page_count_]
+        sqlite3_int64 pageno_sum =
+            outer_db_->execAndGet("SELECT SUM(pageno) FROM " + inner_db_tablename_prefix_ + "pages")
                 .getInt64();
-        return page_idx_sum == page_count_ * (page_count_ - 1) / 2;
+        return pageno_sum == page_count_ * (page_count_ + 1) / 2;
     }
 
     // Decode one page from the blob stored in the outer db (page_size_ bytes out). Override me!
-    virtual void DecodePage(sqlite3_int64 page_idx, const SQLite::Column &data,
+    virtual void DecodePage(sqlite3_int64 pageno, const SQLite::Column &data,
                             const SQLite::Column &meta1, const SQLite::Column &meta2, void *dest) {
         if (!data.isBlob() || data.getBytes() != page_size_) {
-            std::string errmsg = "page " + std::to_string(page_idx) +
+            std::string errmsg = "page " + std::to_string(pageno) +
                                  " size = " + std::to_string(data.getBytes()) +
                                  " expected = " + std::to_string(page_size_);
             throw SQLite::Exception(errmsg, SQLITE_CORRUPT);
@@ -140,7 +139,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     // holds state of page-encoding background job
     struct EncodeJob {
         // job inputs
-        sqlite3_int64 page_idx = -1;
+        sqlite3_int64 pageno = -1;
         std::string page;
         bool insert = false;
 
@@ -164,10 +163,10 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     virtual std::unique_ptr<EncodeJob> NewEncodeJob() {
         return std::unique_ptr<EncodeJob>(new EncodeJob);
     }
-    virtual void InitEncodeJob(EncodeJob &job, sqlite3_int64 page_idx, const void *page_data) {
+    virtual void InitEncodeJob(EncodeJob &job, sqlite3_int64 pageno, const void *page_data) {
         // Initialize job in main thread
-        job.page_idx = page_idx;
-        job.insert = page_idx == page_count_;
+        job.pageno = pageno;
+        job.insert = pageno > page_count_;
         if (page_data) {
             // copy page data for background-encoding
             job.page.assign((const char *)page_data, page_size_);
@@ -188,8 +187,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     std::string upsert_errmsg_;
 
     // enqueue page encoding+upsert on thread pool
-    void EnqueueUpsert(sqlite_int64 page_idx, const void *page) {
-        assert(page_idx <= page_count_);
+    void EnqueueUpsert(sqlite_int64 pageno, const void *page) {
         try {
             std::unique_ptr<EncodeJob> job;
             {
@@ -204,7 +202,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             if (!job) {
                 NewEncodeJob().swap(job);
             }
-            InitEncodeJob(*job, page_idx, page);
+            InitEncodeJob(*job, pageno, page);
+            assert(job->insert ? pageno == page_count_ + 1 : pageno <= page_count_);
             page_count_ += job->insert ? 1 : 0;
             // use ThreadPool to run encoding jobs in parallel and upsert jobs serially
             thread_pool_.Enqueue(
@@ -238,7 +237,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             if (!job->meta2null) {
                 upsert->bind(3, job->meta2);
             }
-            upsert->bind(4, job->page_idx);
+            upsert->bind(4, job->pageno);
             StatementResetter resetter(*upsert);
             if (upsert->exec() != 1) {
                 throw std::runtime_error("unexpected result from page upsert");
@@ -312,25 +311,26 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             }
 
             // calculate page number range
-            sqlite3_int64 beg_page = iOfst / page_size_, end_page = (iOfst + iAmt - 1) / page_size_,
-                          prev_page = beg_page - 1;
+            sqlite3_int64 first_page = 1 + iOfst / page_size_,
+                          last_page = first_page + (iAmt - 1) / page_size_,
+                          prev_page = first_page - 1;
             int sofar = 0;
 
             // scan them
             StatementResetter resetter(select_pages_);
-            select_pages_.bind(1, beg_page);
-            select_pages_.bind(2, end_page);
+            select_pages_.bind(1, first_page);
+            select_pages_.bind(2, last_page);
             while (select_pages_.executeStep()) {
                 // check page number sequence
                 assert(select_pages_.getColumnCount() >= 4);
                 assert(select_pages_.getColumn(0).isInteger());
-                assert(select_pages_.getColumnName(0) == std::string("page_idx"));
+                assert(select_pages_.getColumnName(0) == std::string("pageno"));
                 assert(select_pages_.getColumn(1).isBlob());
                 assert(select_pages_.getColumnName(1) == std::string("data"));
                 assert(select_pages_.getColumnName(2) == std::string("meta1"));
                 assert(select_pages_.getColumnName(3) == std::string("meta2"));
-                sqlite3_int64 page_idx = select_pages_.getColumn(0).getInt64();
-                if (page_idx < beg_page || page_idx > end_page || page_idx != ++prev_page) {
+                sqlite3_int64 pageno = select_pages_.getColumn(0).getInt64();
+                if (pageno < first_page || pageno > last_page || pageno != ++prev_page) {
                     throw SQLite::Exception("incomplete page sequence", SQLITE_CORRUPT);
                 }
                 // decode page & append to zBuf
@@ -339,14 +339,14 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 int desired = std::min(iAmt - sofar, (int)page_size_ - page_ofs);
                 if (page_ofs == 0 && desired == page_size_) {
                     // aligned read of a whole page
-                    DecodePage(page_idx, data, select_pages_.getColumn(2),
-                               select_pages_.getColumn(3), (uint8_t *)zBuf + sofar);
+                    DecodePage(pageno, data, select_pages_.getColumn(2), select_pages_.getColumn(3),
+                               (uint8_t *)zBuf + sofar);
                 } else {
                     // non-aligned read (happens when SQLite reads the db header)
-                    assert(page_idx == 0);
+                    assert(pageno == 1);
                     std::vector<char> pagebuf(page_size_, 0);
-                    DecodePage(page_idx, data, select_pages_.getColumn(2),
-                               select_pages_.getColumn(3), pagebuf.data());
+                    DecodePage(pageno, data, select_pages_.getColumn(2), select_pages_.getColumn(3),
+                               pagebuf.data());
                     memcpy((uint8_t *)zBuf + sofar, pagebuf.data() + page_ofs, desired);
                 }
                 // update sofar
@@ -361,12 +361,12 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             }
             assert(sofar == iAmt);
 #ifndef NDEBUG
-            if (beg_page == last_page_read_ + 1) {
+            if (first_page == last_page_read_ + 1) {
                 sequential_reads_++;
             } else {
                 non_sequential_reads_++;
             }
-            last_page_read_ = end_page;
+            last_page_read_ = last_page;
             longest_read_ = std::max((sqlite3_int64)iAmt, longest_read_);
 #endif
             return SQLITE_OK;
@@ -398,18 +398,18 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             if (!insert_page_) {
                 insert_page_.reset(new SQLite::Statement(
                     *outer_db_, "INSERT INTO " + inner_db_tablename_prefix_ +
-                                    "pages(data,meta1,meta2,page_idx) VALUES(?,?,?,?)"));
+                                    "pages(data,meta1,meta2,pageno) VALUES(?,?,?,?)"));
             }
             if (!update_page_) {
                 update_page_.reset(new SQLite::Statement(
                     *outer_db_, "UPDATE " + inner_db_tablename_prefix_ +
-                                    "pages SET data=?, meta1=?, meta2=? WHERE page_idx=?"));
+                                    "pages SET data=?, meta1=?, meta2=? WHERE pageno=?"));
             }
 
             begin();
             while (iOfst / page_size_ > DetectPageCount()) {
                 // write past current EOF; fill "hole" with zeroes
-                EnqueueUpsert((sqlite3_int64)page_count_, nullptr);
+                EnqueueUpsert(sqlite3_int64(page_count_ + 1), nullptr);
             }
 
             // upsert each provided page
@@ -417,7 +417,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             while (sofar < iAmt) {
                 assert(!((iOfst + sofar) % page_size_));
                 assert(!((iAmt - sofar) % page_size_));
-                EnqueueUpsert((iOfst + sofar) / page_size_, (uint8_t *)zBuf + sofar);
+                EnqueueUpsert(1 + (iOfst + sofar) / page_size_, (uint8_t *)zBuf + sofar);
                 sofar += page_size_;
             }
             assert(sofar == iAmt);
@@ -448,7 +448,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             if (!delete_pages_) {
                 delete_pages_.reset(
                     new SQLite::Statement(*outer_db_, "DELETE FROM " + inner_db_tablename_prefix_ +
-                                                          "pages WHERE page_idx >= ?"));
+                                                          "pages WHERE pageno > ?"));
             }
             delete_pages_->bind(1, new_page_count);
             StatementResetter resetter(*delete_pages_);
@@ -559,9 +559,9 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         : outer_db_(std::move(outer_db)), inner_db_tablename_prefix_(inner_db_tablename_prefix),
           read_only_(read_only),
           select_pages_(*outer_db_, "SELECT * FROM " + inner_db_tablename_prefix_ +
-                                        "pages WHERE page_idx BETWEEN ? AND ? ORDER BY page_idx"),
-          // MAX(page_idx) instead of COUNT(page_idx) because the latter would trigger table scan
-          select_page_count_(*outer_db_, "SELECT IFNULL(MAX(page_idx)+1, 0) FROM " +
+                                        "pages WHERE pageno BETWEEN ? AND ? ORDER BY pageno"),
+          // MAX(pageno) instead of COUNT(pageno) because the latter would trigger table scan
+          select_page_count_(*outer_db_, "SELECT IFNULL(MAX(pageno), 0) FROM " +
                                              inner_db_tablename_prefix_ + "pages"),
           thread_pool_(threads, threads * 3) {
         methods_.iVersion = 1;
@@ -598,7 +598,7 @@ class VFS : public SQLiteVFS::Wrapper {
         }
         std::vector<std::pair<const char *, const char *>> ddl = {
             {"CREATE TABLE ",
-             "pages (page_idx INTEGER PRIMARY KEY, data BLOB NOT NULL, meta1 BLOB, meta2 BLOB)"}};
+             "pages (pageno INTEGER PRIMARY KEY, data BLOB NOT NULL, meta1 BLOB, meta2 BLOB)"}};
         for (const auto &p : ddl) {
             SQLite::Statement(db, p.first + inner_db_tablename_prefix_ + p.second).executeStep();
         }

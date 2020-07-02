@@ -166,7 +166,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             // fetch random pages
             if (!dict_pages_) {
                 std::ostringstream sql;
-                sql << "SELECT data, meta1, meta2 FROM nested_vfs_zstd_pages WHERE page_idx IN (?";
+                sql << "SELECT data, meta1, meta2 FROM nested_vfs_zstd_pages WHERE pageno IN (?";
                 for (i = 1; i < dict_training_pages_; i++) {
                     sql << ",?";
                 }
@@ -177,7 +177,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             std::vector<char> pages(dict_training_pages_ * page_size_);
             StatementResetter dict_pages_resetter(*dict_pages_);
             for (i = 0; i < dict_training_pages_; i++) {
-                dict_pages_->bind(i + 1, page_indices[i]);
+                dict_pages_->bind(i + 1, page_indices[i] + 1);
             }
             for (i = 0; i < dict_training_pages_ && dict_pages_->executeStep(); i++) {
                 DecodePage(page_indices[i], dict_pages_->getColumn(0), dict_pages_->getColumn(1),
@@ -230,7 +230,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
     }
 
     // Decode one page from the blob stored in the outer db (page_size_ bytes out)
-    virtual void DecodePage(sqlite_int64 page_idx, const SQLite::Column &data,
+    virtual void DecodePage(sqlite_int64 pageno, const SQLite::Column &data,
                             const SQLite::Column &meta1, const SQLite::Column &meta2,
                             void *dest) override {
         if (meta1.isInteger()) {
@@ -254,7 +254,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
                 throw SQLite::Exception("zstd page decompression failed", SQLITE_CORRUPT);
             }
         } else if (meta1.isNull()) { // uncompressed page
-            SQLiteNested::InnerDatabaseFile::DecodePage(page_idx, data, meta1, meta2, dest);
+            SQLiteNested::InnerDatabaseFile::DecodePage(pageno, data, meta1, meta2, dest);
         } else {
             throw SQLite::Exception("unexpected meta1 entry in zstd page table", SQLITE_CORRUPT);
         }
@@ -273,7 +273,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
         }
         void Execute() noexcept override {
             // Execute the job, possibly on a worker thread
-            if (page_idx > 0) {
+            if (pageno > 1) {
                 size_t capacity = ZSTD_compressBound(page.size());
                 if (buffer.size() < capacity) {
                     buffer.resize(capacity);
@@ -300,7 +300,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             }
 
             // fall through: call super to copy page uncompressed. one of:
-            // - don't compress page_idx=0, as super looks at that to detect the db page size
+            // - don't compress first page, as super looks at that to detect the db page size
             // - compression judged to have failed (ratio < 20%)
             assert(meta1null);
             super::EncodeJob::Execute();
@@ -309,9 +309,9 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
     std::unique_ptr<super::EncodeJob> NewEncodeJob() override {
         return std::unique_ptr<super::EncodeJob>(new CompressJob);
     }
-    void InitEncodeJob(super::EncodeJob &superjob, sqlite3_int64 page_idx,
+    void InitEncodeJob(super::EncodeJob &superjob, sqlite3_int64 pageno,
                        const void *page_data) override {
-        super::InitEncodeJob(superjob, page_idx, page_data);
+        super::InitEncodeJob(superjob, pageno, page_data);
         auto &job = reinterpret_cast<CompressJob &>(superjob);
         if (!job.cctx && !(job.cctx = ZSTD_createCCtx())) {
             throw SQLite::Exception("ZSTD_createCCtx", SQLITE_NOMEM);

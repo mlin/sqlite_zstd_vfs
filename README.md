@@ -93,9 +93,9 @@ Here are some operation timings using a [1,195MiB TPC-H database](https://github
 
 |    | db file size | bulk load<sup>1</sup> | Query 1 | Query 8 |
 | -- | --: | --: | --: | --: |
-| SQLite defaults | 1182MiB | 4.5s | 8.2s | 4.2s |
-| zstd_vfs defaults | 647MiB | 22.9s | 11.4s | 45.9s |
-| zstd_vfs tuned<sup>2</sup> | 500MiB | 15.5s | 10.8s | 7.5s |
+| SQLite defaults | 1182MiB | 4.3s | 8.4s | 3.9s |
+| zstd_vfs defaults | 647MiB | 21.1s | 11.5s | 44.7s |
+| zstd_vfs tuned<sup>2</sup> | 500MiB | 14.9s | 10.6s | 7.1s |
 
 <sup>1</sup> by VACUUM INTO<br/>
 <sup>2</sup> `&level=6&threads=8&outer_page_size=16384&outer_unsafe=true`; [`PRAGMA page_size=8192`](https://www.sqlite.org/pragma.html#pragma_page_size); [`PRAGMA cache_size=-102400`](https://www.sqlite.org/pragma.html#pragma_cache_size)
