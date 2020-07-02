@@ -104,19 +104,23 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             sqlite3_int64 page_count = select_page_count_.getColumn(0);
             assert(page_count >= 0);
             if (page_count > 0) {
-                assert(select_page_count_.getColumn(1).isInteger());
-                // integrity check, page indices are sequential [0-page_count)
-                sqlite3_int64 sum_page_idx = select_page_count_.getColumn(1).getInt64();
-                if (sum_page_idx != page_count * (page_count - 1) / 2) {
-                    throw SQLite::Exception("missing pages", SQLITE_CORRUPT);
-                }
                 page_count_ = page_count;
             } else {
                 assert(page_count == 0);
                 page_count_ = 0;
             }
+            assert(VerifyPageCount());
         }
         return page_count_;
+    }
+
+    bool VerifyPageCount() {
+        // integrity check: page indices are sequential [0-page_count_).
+        sqlite3_int64 page_idx_sum =
+            outer_db_
+                ->execAndGet("SELECT SUM(page_idx) FROM " + inner_db_tablename_prefix_ + "pages")
+                .getInt64();
+        return page_idx_sum == page_count_ * (page_count_ - 1) / 2;
     }
 
     // Decode one page from the blob stored in the outer db (page_size_ bytes out). Override me!
@@ -308,8 +312,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             }
 
             // calculate page number range
-            sqlite3_int64 beg_page = iOfst / page_size_,
-                          end_page = 1 + (iOfst + iAmt - 1) / page_size_, prev_page = beg_page - 1;
+            sqlite3_int64 beg_page = iOfst / page_size_, end_page = (iOfst + iAmt - 1) / page_size_,
+                          prev_page = beg_page - 1;
             int sofar = 0;
 
             // scan them
@@ -326,7 +330,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 assert(select_pages_.getColumnName(2) == std::string("meta1"));
                 assert(select_pages_.getColumnName(3) == std::string("meta2"));
                 sqlite3_int64 page_idx = select_pages_.getColumn(0).getInt64();
-                if (page_idx < beg_page || page_idx >= end_page || page_idx != ++prev_page) {
+                if (page_idx < beg_page || page_idx > end_page || page_idx != ++prev_page) {
                     throw SQLite::Exception("incomplete page sequence", SQLITE_CORRUPT);
                 }
                 // decode page & append to zBuf
@@ -362,7 +366,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             } else {
                 non_sequential_reads_++;
             }
-            last_page_read_ = end_page - 1;
+            last_page_read_ = end_page;
             longest_read_ = std::max((sqlite3_int64)iAmt, longest_read_);
 #endif
             return SQLITE_OK;
@@ -451,6 +455,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             begin();
             delete_pages_->exec();
             page_count_ = new_page_count;
+            assert(VerifyPageCount());
             return SQLITE_OK;
         } catch (std::exception &exn) {
             _DBG << exn.what() << _EOL;
@@ -468,6 +473,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             page_count_ = 0; // to be redetected
             return SQLITE_IOERR_WRITE;
         }
+        assert(VerifyPageCount());
         try {
             if (txn_) {
                 txn_->commit();
@@ -552,10 +558,10 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                       const std::string &inner_db_tablename_prefix, bool read_only, size_t threads)
         : outer_db_(std::move(outer_db)), inner_db_tablename_prefix_(inner_db_tablename_prefix),
           read_only_(read_only),
-          select_pages_(*outer_db_,
-                        "SELECT * FROM " + inner_db_tablename_prefix_ +
-                            "pages WHERE page_idx >= ? AND page_idx < ? ORDER BY page_idx"),
-          select_page_count_(*outer_db_, "SELECT COUNT(page_idx), SUM(page_idx) FROM " +
+          select_pages_(*outer_db_, "SELECT * FROM " + inner_db_tablename_prefix_ +
+                                        "pages WHERE page_idx BETWEEN ? AND ? ORDER BY page_idx"),
+          // MAX(page_idx) instead of COUNT(page_idx) because the latter would trigger table scan
+          select_page_count_(*outer_db_, "SELECT IFNULL(MAX(page_idx)+1, 0) FROM " +
                                              inner_db_tablename_prefix_ + "pages"),
           thread_pool_(threads, threads * 3) {
         methods_.iVersion = 1;
