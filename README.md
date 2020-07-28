@@ -84,7 +84,7 @@ Repeat the query to see the update.
 * Linux x86-64 oriented; help wanted for other targets.
 * [EXCLUSIVE locking mode](https://www.sqlite.org/pragma.html#pragma_locking_mode) always applies (a writer excludes all other connections for the lifetime of its own connection).
   * Relaxing this is possible, but naturally demands rigorous concurrency testing. Help wanted.
-* WAL mode behavior is currently unknown; do not touch.
+* WAL mode isn't yet supported; do not touch.
 * Once more: **USE AT YOUR OWN RISK**
 
 ## Performance

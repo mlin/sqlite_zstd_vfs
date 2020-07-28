@@ -686,11 +686,18 @@ class VFS : public SQLiteVFS::Wrapper {
             }
         }
         // Anything besides inner database file: let outer VFS handle it.
-        // Remove (SQLITE_OPEN_WAL|SQLITE_OPEN_MAIN_JOURNAL) to prevent SQLite os_unix.c from
-        // trying to copy owner/perms of the inner database file (which won't exist from its point
-        // of view)
-        //    see: https://sqlite.org/src/file?name=src/os_unix.c&ci=tip
-        flags &= ~(SQLITE_OPEN_WAL | SQLITE_OPEN_MAIN_JOURNAL);
+        // Remove SQLITE_OPEN_MAIN_JOURNAL to prevent SQLite os_unix.c from trying to copy owner &
+        // perms of the inner database file, which doesn't exist from its POV. We assume os_unix.c
+        // doesn't do anything else special for SQLITE_OPEN_MAIN_JOURNAL that might be required for
+        // transaction safety! (The inner journal file is usually unused anyway.)
+        // see: https://sqlite.org/src/file?name=src/os_unix.c&ci=tip
+        // Note it has an assert that flags has -some- eType set; so, in case the host SQLite has
+        // assertions on, we add SQLITE_OPEN_SUBJOURNAL when we remove SQLITE_OPEN_MAIN_JOURNAL.
+        // The same issue will affect SQLITE_OPEN_WAL if/when we try to suport WAL mode.
+        if (flags & SQLITE_OPEN_MAIN_JOURNAL) {
+            flags &= ~SQLITE_OPEN_MAIN_JOURNAL;
+            flags |= SQLITE_OPEN_SUBJOURNAL;
+        }
         assert(vfs_.szOsFile >= wrapped_->szOsFile);
         return wrapped_->xOpen(wrapped_, zName, pFile, flags, pOutFlags);
     }
