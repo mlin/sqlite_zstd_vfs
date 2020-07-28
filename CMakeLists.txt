@@ -16,6 +16,7 @@ if(${CMAKE_VERSION} VERSION_LESS 3.14)
 endif()
 
 set(SQLITECPP_INTERNAL_SQLITE OFF CACHE INTERNAL "")
+set(SQLITE_ENABLE_COLUMN_METADATA OFF CACHE INTERNAL "")
 FetchContent_Declare(
     sqlitecpp
     GIT_REPOSITORY  https://github.com/SRombauts/SQLiteCpp.git
