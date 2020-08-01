@@ -8,7 +8,7 @@ Compressed page storage operates similarly to the [design of ZIPVFS](https://sql
 
 ### Included in GenomicSQLite
 
-**The easiest way to use the VFS is through the [Genomics Extension for SQLite](https://github.com/mlin/GenomicSQLite), which includes it as a core component, pre-tuned with nicely-packaged language bindings. That extension's other, bioinformatics-specific functionality can be ignored without harm.**
+**The easiest way to use the VFS is through the [Genomics Extension for SQLite](https://github.com/mlin/GenomicSQLite), which bundles it as a core component with pre-tuned settings and nicely-packaged language bindings. That extension's bioinformatics-specific features can be ignored without harm.**
 
 Standalone instructions follow.
 
