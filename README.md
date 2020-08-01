@@ -4,11 +4,13 @@ This [SQLite VFS extension](https://www.sqlite.org/vfs.html) provides streaming 
 
 Compressed page storage operates similarly to the [design of ZIPVFS](https://sqlite.org/zipvfs/doc/trunk/www/howitworks.wiki), the SQLite developers' proprietary extension. Because we're not as familiar with the internal "pager" module, we use a full-fledged SQLite database as the bottom-most layer. Where SQLite would write database page #P at offset P × page_size in the disk file, instead we `INSERT INTO outer_page_table(rowid,data) VALUES(P,compressed_inner_page)`, and later `SELECT data FROM outer_page_table WHERE rowid=P`. *You mustn't be afraid to dream a little smaller, darling...*
 
-**USE AT YOUR OWN RISK:** we've not yet prioritized testing for all-hazards transaction safety (although we do believe the design is sound). This project is not associated with the SQLite developers.
+**USE AT YOUR OWN RISK:** The extension makes fundamental changes to the database storage layer. While designed to preserve ACID transaction safety, it's young and unlikely to have zero bugs. This project is not associated with the SQLite developers.
 
-## Included in GenomicSQLite
+### Included in GenomicSQLite
 
-**The easiest way to use the VFS is through the [Genomics Extension for SQLite](https://github.com/mlin/GenomicSQLite), which includes it as a core component, published in pre-built packages with detailed documentation. The extension has other functionality specific to bioinformatics applications, which aren't harmful if you ignore them.**
+**The easiest way to use the VFS is through the [Genomics Extension for SQLite](https://github.com/mlin/GenomicSQLite), which includes it as a core component, pre-tuned with nicely-packaged language bindings. That extension's other, bioinformatics-specific functionality can be ignored without harm.**
+
+Standalone instructions follow.
 
 ## Quick start
 
