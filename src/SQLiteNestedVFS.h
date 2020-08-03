@@ -705,7 +705,7 @@ class VFS : public SQLiteVFS::Wrapper {
     // Given user-provided db filename, use it as the outer db on the host filesystem, and append
     // a suffix as the inner db's filename (which won't actually exist on the host filesystem, but
     // xOpen() will recognize).
-    int FullPathname(const char *zName, int nPathOut, char *zPathOut) {
+    int FullPathname(const char *zName, int nPathOut, char *zPathOut) override {
         int rc = SQLiteVFS::Wrapper::FullPathname(zName, nPathOut, zPathOut);
         if (rc != SQLITE_OK) {
             return rc;
