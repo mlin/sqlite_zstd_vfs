@@ -68,7 +68,7 @@ def test_roundtrip(tmpdir, chinook_file):
 
     # dump from the nested version
     rslt = subprocess.run(
-        f"sqlite3 :memory: -bail -cmd '.load {os.path.join(BUILD,'nested_vfs.so')}' -cmd '.open file:{dbfn}?mode=ro&vfs=nested' -cmd .dump -cmd .exit",
+        f"sqlite3 :memory: -bail -cmd '.load {os.path.join(BUILD,'nested_vfs')}' -cmd '.open file:{dbfn}?mode=ro&vfs=nested' -cmd .dump -cmd .exit",
         check=True,
         shell=True,
         cwd=tmpdir,
@@ -120,7 +120,7 @@ def test_roundtrip_zstd(tmpdir, chinook_file):
 
     # dump from the zstd version
     rslt = subprocess.run(
-        f"sqlite3 :memory: -bail -cmd '.load {os.path.join(BUILD,'zstd_vfs.so')}' -cmd '.open file:{dbfn}?mode=ro&vfs=zstd' -cmd .dump -cmd .exit",
+        f"sqlite3 :memory: -bail -cmd '.load {os.path.join(BUILD,'zstd_vfs')}' -cmd '.open file:{dbfn}?mode=ro&vfs=zstd' -cmd .dump -cmd .exit",
         check=True,
         shell=True,
         cwd=tmpdir,
@@ -141,7 +141,7 @@ def test_vacuum(tmpdir, chinook_file):
 
     # dump from the zstd version
     rslt = subprocess.run(
-        f"sqlite3 :memory: -bail -cmd '.load {os.path.join(BUILD,'zstd_vfs.so')}' -cmd '.open file:{dbfn}?mode=ro&vfs=zstd' -cmd .dump -cmd .exit",
+        f"sqlite3 :memory: -bail -cmd '.load {os.path.join(BUILD,'zstd_vfs')}' -cmd '.open file:{dbfn}?mode=ro&vfs=zstd' -cmd .dump -cmd .exit",
         check=True,
         shell=True,
         cwd=tmpdir,
@@ -195,7 +195,7 @@ def test_sam(tmpdir):
         f"""
         zstd -dc {region}.sam.zst | sed s/\\'/\\'\\'/g | awk -f sam2sql.awk \
             | sqlite3 :memory: -bail \
-                -cmd '.load {os.path.join(BUILD,'zstd_vfs.so')}' \
+                -cmd '.load {os.path.join(BUILD,'zstd_vfs')}' \
                 -cmd '.open file:{region}.zstd.sqlite?vfs=zstd&outer_unsafe=true&outer_page_size={outer_page_size}&level={level}' \
                 -cmd 'PRAGMA page_size={page_size}'
         """,
@@ -207,7 +207,7 @@ def test_sam(tmpdir):
         f"""
         zstd -dc {region}.sam.zst | sed s/\\'/\\'\\'/g | awk -f sam2sql.awk \
             | sqlite3 :memory: -bail \
-                -cmd '.load {os.path.join(BUILD,'zstd_vfs.so')}' \
+                -cmd '.load {os.path.join(BUILD,'zstd_vfs')}' \
                 -cmd '.open file:{region}.zstd.nodict.sqlite?vfs=zstd&outer_unsafe=true&outer_page_size={outer_page_size}&level={level}&dict=false' \
                 -cmd 'PRAGMA page_size={page_size}'
         """,
