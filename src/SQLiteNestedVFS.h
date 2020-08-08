@@ -49,71 +49,19 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     std::unique_ptr<SQLite::Database> outer_db_;
     std::string inner_db_tablename_prefix_; // can be overridden in VFS, not here
     bool read_only_;
+
+    /**********************************************************************************************
+     * Database file geometry
+     *********************************************************************************************/
+
     size_t page_size_ = 0, page_count_ = 0;
-    // cached statements; must be declared after outer_db_ so that they're destructed first
-    std::unique_ptr<SQLite::Transaction> txn_;
-    SQLite::Statement select_page_count_;
-    std::unique_ptr<SQLite::Statement> insert_page_, update_page_, delete_pages_;
-
-    // To optimize sequential page reads, we usually keep a cursor open to the next page after the
-    // one last read; this internal struct manages the state for that. We must be careful to reset
-    // it at certain times (e.g. when writing a page) to ensure the open cursor can't be stale.
-    struct ReadCursor {
-        SQLite::Statement select_pages_;
-        sqlite3_int64 pageno_ = 0, sequential_reads_ = 0, non_sequential_reads_ = 0;
-
-        ReadCursor(SQLite::Database &db, const std::string &inner_db_tablename_prefix)
-            : select_pages_(db, "SELECT pageno, data, meta1, meta2 FROM " +
-                                    inner_db_tablename_prefix +
-                                    "pages WHERE pageno >= ? ORDER BY pageno") {}
-
-        void Reset() {
-            if (pageno_ > 0) {
-                select_pages_.reset();
-                pageno_ = 0;
-            }
-        }
-
-        void Seek(sqlite3_int64 pageno) {
-            assert(pageno > 0);
-            if (pageno_ == pageno) {
-                sequential_reads_++;
-            } else {
-                Reset();
-                select_pages_.bind(1, pageno);
-                pageno_ = pageno;
-                non_sequential_reads_++;
-            }
-            if (!select_pages_.executeStep()) {
-                throw SQLite::Exception("page missing", SQLITE_CORRUPT);
-            }
-            pageno_++;
-            assert(select_pages_.getColumn(0).isInteger());
-            assert(select_pages_.getColumn(0).getInt64() == pageno);
-            assert(select_pages_.getColumn(1).isBlob());
-        }
-
-        SQLite::Column getColumn(int idx) { return select_pages_.getColumn(idx); }
-    };
-    ReadCursor cursor_;
-    sqlite3_int64 longest_read_ = 0;
-
-    // On the first Write() we open a transaction with the outer db as a buffer for this and
-    // subsequent writes, which we commit upon Sync() or Close(). We never explicitly rollback this
-    // transaction, although rollback may occur if the process/host crashes. By Assumption 2 above,
-    // inner db should always recover to a consistent state.
-    void begin() {
-        assert(!read_only_);
-        if (!txn_) {
-            txn_.reset(new SQLite::Transaction(*outer_db_));
-        }
-    }
 
     // Update page_count_ (a mutable property of the inner db) based on some inspection of outer
     // db. Leave it at zero if the inner db is still new.
     //   1. Corruption is likely to occur if page_count_ somehow drifts from the actual outer db
     //      state, e.g. by a concurrent writer. Outer db should have EXCLUSIVE locking mode.
     //   2. Write() may update page_count_ to reflect newly written pages without calling this.
+    SQLite::Statement select_page_count_;
     size_t DetectPageCount() {
         if (!page_count_) {
             StatementResetter resetter(select_page_count_);
@@ -158,6 +106,69 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         return pageno_sum == page_count_ * (page_count_ + 1) / 2;
     }
 
+    int FileSize(sqlite3_int64 *pSize) override {
+        try {
+            FinishUpserts();
+            *pSize = DetectPageSize() * DetectPageCount();
+            return SQLITE_OK;
+        } catch (std::exception &exn) {
+            _DBG << exn.what() << _EOL;
+            return SQLITE_IOERR;
+        }
+    }
+
+    /**********************************************************************************************
+     * Read() and helpers
+     *********************************************************************************************/
+
+    // To optimize sequential page reads, we usually keep a cursor open to the next page after the
+    // one last read; this internal struct manages the state for that. We must be careful to reset
+    // it at certain times (e.g. when writing a page) to ensure the open cursor can't be stale.
+    struct ReadCursor {
+        SQLite::Statement select_pages_;
+        sqlite3_int64 pageno_ = 0;
+        sqlite3_int64 sequential_ = 0, non_sequential_ = 0;
+
+        ReadCursor(SQLite::Database &db, const std::string &inner_db_tablename_prefix)
+            : select_pages_(db, "SELECT pageno, data, meta1, meta2 FROM " +
+                                    inner_db_tablename_prefix +
+                                    "pages WHERE pageno >= ? ORDER BY pageno") {}
+
+        void Reset() {
+            if (pageno_ > 0) {
+                select_pages_.reset();
+                pageno_ = 0;
+            }
+        }
+
+        void Seek(sqlite3_int64 pageno) {
+            assert(pageno > 0);
+            if (pageno_ && pageno == pageno_ + 1) {
+                sequential_++;
+            } else {
+                Reset();
+                select_pages_.bind(1, pageno);
+                non_sequential_++;
+            }
+            try {
+                pageno_ = pageno;
+                if (!select_pages_.executeStep()) {
+                    throw SQLite::Exception("page missing", SQLITE_CORRUPT);
+                }
+            } catch (...) {
+                Reset();
+                throw;
+            }
+            assert(select_pages_.getColumn(0).isInteger());
+            assert(select_pages_.getColumn(0).getInt64() == pageno);
+            assert(select_pages_.getColumn(1).isBlob());
+        }
+
+        SQLite::Column getColumn(int idx) { return select_pages_.getColumn(idx); }
+    };
+    ReadCursor cursor_;
+    sqlite3_int64 longest_read_ = 0;
+
     // Decode one page from the blob stored in the outer db (page_size_ bytes out). Override me!
     virtual void DecodePage(sqlite3_int64 pageno, const SQLite::Column &data,
                             const SQLite::Column &meta1, const SQLite::Column &meta2, void *dest) {
@@ -170,7 +181,84 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         memcpy(dest, data.getBlob(), page_size_);
     }
 
-    ThreadPool thread_pool_;
+    int Read(void *zBuf, int iAmt, sqlite3_int64 iOfst) override {
+        try {
+            assert(iAmt >= 0);
+            if (iAmt == 0) {
+                return SQLITE_OK;
+            }
+            FinishUpserts();
+            if (!DetectPageSize()) { // file is empty
+                memset(zBuf, 0, iAmt);
+                return iAmt > 0 ? SQLITE_IOERR_SHORT_READ : SQLITE_OK;
+            }
+            assert(page_size_ <= 65536);
+            if (iOfst >= page_size_ && iOfst % page_size_) { // non-aligned read
+                return SQLITE_IOERR_READ;
+            }
+
+            // calculate page number range
+            sqlite3_int64 first_page = 1 + iOfst / page_size_,
+                          last_page = first_page + (iAmt - 1) / page_size_;
+            int sofar = 0;
+
+            // scan them
+            for (sqlite3_int64 pageno = first_page; pageno <= last_page; ++pageno) {
+                cursor_.Seek(pageno);
+                int page_ofs = sofar == 0 ? iOfst % page_size_ : 0;
+                int desired = std::min(iAmt - sofar, (int)page_size_ - page_ofs);
+                if (page_ofs == 0 && desired == page_size_) {
+                    // aligned read of a whole page
+                    DecodePage(pageno, cursor_.getColumn(1), cursor_.getColumn(2),
+                               cursor_.getColumn(3), (uint8_t *)zBuf + sofar);
+                } else {
+                    // non-aligned read (happens when SQLite reads the db header)
+                    // TODO: optimize with incremental blob I/O, if we know page 1 is "plaintext"
+                    assert(pageno == 1);
+                    std::vector<char> pagebuf(page_size_, 0);
+                    DecodePage(pageno, cursor_.getColumn(1), cursor_.getColumn(2),
+                               cursor_.getColumn(3), pagebuf.data());
+                    memcpy((uint8_t *)zBuf + sofar, pagebuf.data() + page_ofs, desired);
+                }
+                // update sofar
+                sofar += desired;
+                assert(sofar <= iAmt);
+            }
+
+            // finish up
+            if (sofar < iAmt) {
+                memset((uint8_t *)zBuf + sofar, 0, iAmt - sofar);
+                return SQLITE_IOERR_SHORT_READ;
+            }
+            assert(sofar == iAmt);
+            longest_read_ = std::max((sqlite3_int64)iAmt, longest_read_);
+            return SQLITE_OK;
+        } catch (SQLite::Exception &exn) {
+            _DBG << exn.what() << _EOL;
+            switch (exn.getErrorCode()) {
+            case SQLITE_CORRUPT:
+                return SQLITE_CORRUPT;
+            }
+            return SQLITE_IOERR_READ;
+        }
+    }
+
+    /**********************************************************************************************
+     * Write() and helpers
+     *********************************************************************************************/
+
+    // On the first Write() we open a transaction with the outer db as a buffer for this and
+    // subsequent writes, which we commit upon Sync() or Close(). We never explicitly rollback this
+    // transaction, although rollback may occur if the process/host crashes. By Assumption 2 above,
+    // inner db should always recover to a consistent state.
+    std::unique_ptr<SQLite::Transaction> txn_;
+    std::unique_ptr<SQLite::Statement> insert_page_, update_page_, delete_pages_;
+    void begin() {
+        assert(!read_only_);
+        if (!txn_) {
+            txn_.reset(new SQLite::Transaction(*outer_db_));
+        }
+    }
 
     // holds state of page-encoding background job
     struct EncodeJob {
@@ -220,6 +308,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     std::vector<std::unique_ptr<EncodeJob>> encode_job_pool_;
     std::mutex encode_job_pool_mutex_;
 
+    ThreadPool thread_pool_;
     std::string upsert_errmsg_;
 
     // enqueue page encoding+upsert on thread pool
@@ -299,90 +388,6 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         thread_pool_.Barrier();
         if (!ignore_error && !upsert_errmsg_.empty()) {
             throw SQLite::Exception(upsert_errmsg_, SQLITE_IOERR_WRITE);
-        }
-    }
-
-    int Close() override {
-        try {
-            cursor_.Reset();
-            if (!read_only_) {
-                int rc;
-                if ((rc = Sync(0)) != SQLITE_OK) { // includes FinishUpserts
-                    return rc;
-                }
-                outer_db_->exec("PRAGMA incremental_vacuum");
-            }
-        } catch (SQLite::Exception &exn) {
-            _DBG << exn.what() << _EOL;
-            return exn.getErrorCode();
-        }
-        if (cursor_.sequential_reads_ + cursor_.non_sequential_reads_) {
-            _DBG << "reads sequential: " << cursor_.sequential_reads_
-                 << " non-sequential: " << cursor_.non_sequential_reads_
-                 << " longest: " << longest_read_ << _EOL;
-        }
-        return SQLiteVFS::File::Close();
-    }
-
-    int Read(void *zBuf, int iAmt, sqlite3_int64 iOfst) override {
-        try {
-            assert(iAmt >= 0);
-            if (iAmt == 0) {
-                return SQLITE_OK;
-            }
-            FinishUpserts();
-            if (!DetectPageSize()) { // file is empty
-                memset(zBuf, 0, iAmt);
-                return iAmt > 0 ? SQLITE_IOERR_SHORT_READ : SQLITE_OK;
-            }
-            assert(page_size_ <= 65536);
-            if (iOfst >= page_size_ && iOfst % page_size_) { // non-aligned read
-                return SQLITE_IOERR_READ;
-            }
-
-            // calculate page number range
-            sqlite3_int64 first_page = 1 + iOfst / page_size_,
-                          last_page = first_page + (iAmt - 1) / page_size_;
-            int sofar = 0;
-
-            // scan them
-            for (sqlite3_int64 pageno = first_page; pageno <= last_page; ++pageno) {
-                cursor_.Seek(pageno);
-                int page_ofs = sofar == 0 ? iOfst % page_size_ : 0;
-                int desired = std::min(iAmt - sofar, (int)page_size_ - page_ofs);
-                if (page_ofs == 0 && desired == page_size_) {
-                    // aligned read of a whole page
-                    DecodePage(pageno, cursor_.getColumn(1), cursor_.getColumn(2),
-                               cursor_.getColumn(3), (uint8_t *)zBuf + sofar);
-                } else {
-                    // non-aligned read (happens when SQLite reads the db header)
-                    // TODO: optimize with incremental blob I/O, knowing page 1 is uncompressed
-                    assert(pageno == 1);
-                    std::vector<char> pagebuf(page_size_, 0);
-                    DecodePage(pageno, cursor_.getColumn(1), cursor_.getColumn(2),
-                               cursor_.getColumn(3), pagebuf.data());
-                    memcpy((uint8_t *)zBuf + sofar, pagebuf.data() + page_ofs, desired);
-                }
-                // update sofar
-                sofar += desired;
-                assert(sofar <= iAmt);
-            }
-
-            // finish up
-            if (sofar < iAmt) {
-                memset((uint8_t *)zBuf + sofar, 0, iAmt - sofar);
-                return SQLITE_IOERR_SHORT_READ;
-            }
-            assert(sofar == iAmt);
-            longest_read_ = std::max((sqlite3_int64)iAmt, longest_read_);
-            return SQLITE_OK;
-        } catch (SQLite::Exception &exn) {
-            _DBG << exn.what() << _EOL;
-            switch (exn.getErrorCode()) {
-            case SQLITE_CORRUPT:
-                return SQLITE_CORRUPT;
-            }
-            return SQLITE_IOERR_READ;
         }
     }
 
@@ -495,16 +500,9 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         return SQLITE_OK;
     }
 
-    int FileSize(sqlite3_int64 *pSize) override {
-        try {
-            FinishUpserts();
-            *pSize = DetectPageSize() * DetectPageCount();
-            return SQLITE_OK;
-        } catch (std::exception &exn) {
-            _DBG << exn.what() << _EOL;
-            return SQLITE_IOERR;
-        }
-    }
+    /**********************************************************************************************
+     * etc.
+     *********************************************************************************************/
 
     int Lock(int eLock) override {
         /*
@@ -540,6 +538,28 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     int FileControl(int op, void *pArg) override { return SQLITE_NOTFOUND; }
     int SectorSize() override { return 0; }
     int DeviceCharacteristics() override { return 0; }
+
+    int Close() override {
+        try {
+            cursor_.Reset();
+            if (!read_only_) {
+                int rc;
+                if ((rc = Sync(0)) != SQLITE_OK) { // includes FinishUpserts
+                    return rc;
+                }
+                outer_db_->exec("PRAGMA incremental_vacuum");
+            }
+        } catch (SQLite::Exception &exn) {
+            _DBG << exn.what() << _EOL;
+            return exn.getErrorCode();
+        }
+        if (cursor_.sequential_ + cursor_.non_sequential_) {
+            _DBG << "reads sequential: " << cursor_.sequential_
+                 << " non-sequential: " << cursor_.non_sequential_ << " longest: " << longest_read_
+                 << _EOL;
+        }
+        return SQLiteVFS::File::Close();
+    }
 
     int ShmMap(int iPg, int pgsz, int isWrite, void volatile **pp) override {
         assert(false);
