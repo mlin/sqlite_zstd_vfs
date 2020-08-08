@@ -632,6 +632,8 @@ class VFS : public SQLiteVFS::Wrapper {
                 bool unsafe = sqlite3_uri_boolean(zName, "outer_unsafe", 0);
                 if (unsafe) {
                     outer_db_uri += "?nolock=1&psow=1";
+                } else if (sqlite3_uri_boolean(zName, "immutable", 0)) {
+                    outer_db_uri += "?immutable=1";
                 }
 
                 try {
