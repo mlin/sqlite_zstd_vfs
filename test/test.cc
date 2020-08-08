@@ -110,17 +110,17 @@ TEST_CASE("blob I/O") {
     vector<uint8_t> blob;
     vector<vector<bool>> state = {{true}, {}};
     for (int i = 0; i < 4096; ++i) {
-        if (i && i%4 == 0) {
-            for (int j = 0; j < state[0].size()/8; ++j) {
+        if (i && i % 4 == 0) {
+            for (int j = 0; j < state[0].size() / 8; ++j) {
                 uint8_t byte = 0;
                 for (int k = 0; k < 8; ++k) {
                     byte <<= 1;
-                    byte |= state[0][8*j+k] ? 1 : 0;
+                    byte |= state[0][8 * j + k] ? 1 : 0;
                 }
                 blob.push_back(byte);
             }
         }
-        ElementaryCellularAutomaton(30, state[i%2], state[(i+1)%2]);
+        ElementaryCellularAutomaton(30, state[i % 2], state[(i + 1) % 2]);
     }
 
     {
@@ -143,17 +143,15 @@ TEST_CASE("blob I/O") {
     }
 
     {
-        SQLite::Database dbh(testdir + "/inception",
-                               SQLite::OPEN_READWRITE, 0,
-                               "nested_trace");
+        SQLite::Database dbh(testdir + "/inception", SQLite::OPEN_READWRITE, 0, "nested_trace");
 
         sqlite3_blob *h = nullptr;
         REQUIRE(sqlite3_blob_open(dbh.getHandle(), "main", "test", "value", 2, 1, &h) == SQLITE_OK);
         REQUIRE(sqlite3_blob_bytes(h) == blob.size());
 
         const int N = 65536, ofs = 42424;
-        REQUIRE(ofs+N<blob.size());
-        vector<uint8_t> buf(N,0);
+        REQUIRE(ofs + N < blob.size());
+        vector<uint8_t> buf(N, 0);
 
         REQUIRE(sqlite3_blob_read(h, buf.data(), N, ofs) == SQLITE_OK);
         REQUIRE(memcmp(buf.data(), &blob[ofs], N) == 0);
@@ -169,7 +167,7 @@ TEST_CASE("blob I/O") {
         txn.commit();
 
         REQUIRE(sqlite3_blob_open(dbh.getHandle(), "main", "test", "value", 2, 1, &h) == SQLITE_OK);
-        vector<uint8_t> buf2(N,0);
+        vector<uint8_t> buf2(N, 0);
         REQUIRE(sqlite3_blob_read(h, buf2.data(), N, ofs) == SQLITE_OK);
         REQUIRE(memcmp(buf.data(), buf2.data(), N) == 0);
         REQUIRE(sqlite3_blob_close(h) == SQLITE_OK);
