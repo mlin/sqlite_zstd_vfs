@@ -627,14 +627,22 @@ class VFS : public SQLiteVFS::Wrapper {
                     return SQLITE_CANTOPEN_FULLPATH;
                 }
 
+                // TODO: URI-encode outer_db_filename
+                std::string outer_db_uri = "file:" + outer_db_filename;
+                bool unsafe = sqlite3_uri_boolean(zName, "outer_unsafe", 0);
+                if (unsafe) {
+                    outer_db_uri += "?nolock=1&psow=1";
+                }
+
                 try {
                     // open outer database
                     std::unique_ptr<SQLite::Database> outer_db(new SQLite::Database(
-                        outer_db_filename, flags | SQLITE_OPEN_NOMUTEX, 0, outer_vfs_));
+                        outer_db_uri, flags | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI, 0,
+                        outer_vfs_));
                     // need exclusive locking mode to protect InnerDatabaseFile::page_count_; see
                     // discussion in Lock()
                     outer_db->exec("PRAGMA locking_mode=EXCLUSIVE");
-                    if (sqlite3_uri_boolean(zName, "outer_unsafe", 0)) {
+                    if (unsafe) {
                         outer_db->exec(UNSAFE_PRAGMAS);
                     }
                     auto outer_cache_size = sqlite3_uri_int64(zName, "outer_cache_size", 0);
