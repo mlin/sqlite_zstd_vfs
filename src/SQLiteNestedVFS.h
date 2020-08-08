@@ -59,7 +59,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     // Update page_count_ (a mutable property of the inner db) based on some inspection of outer
     // db. Leave it at zero if the inner db is still new.
     //   1. Corruption is likely to occur if page_count_ somehow drifts from the actual outer db
-    //      state, e.g. by a concurrent writer. Outer db should have EXCLUSIVE locking mode.
+    //      state, e.g. by a concurrent writer. We must redetect it every time we take read lock.
     //   2. Write() may update page_count_ to reflect newly written pages without calling this.
     SQLite::Statement select_page_count_;
     size_t DetectPageCount() {
@@ -486,7 +486,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             page_count_ = 0; // to be redetected
             return SQLITE_IOERR_WRITE;
         }
-        assert(VerifyPageCount());
+        assert(page_count_ == 0 || VerifyPageCount());
         try {
             if (txn_) {
                 txn_->commit();
@@ -508,14 +508,10 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         /*
         No-op: currently we hardcode locking_mode=EXCLUSIVE for the outer db, so there's no need to
         respond to inner db lock calls. This can be relaxed in the future by:
-          - when we get Lock(SQLITE_LOCK_SHARED): begin(), re-detect the page count and hold open
-            the cursor from that query.
-          - when we get Lock(SQLITE_LOCK_EXCLUSIVE): perform some dummy write like
-            PRAGMA user_version=(PRAGMA user_version)+1
-          - when we get xUnlock(SQLITE_LOCK_SHARED), assert that we recently serviced a Sync()
-            (=> committed the outer txn) and no subsequent Read() or Write() ops
-          - when we get xUnlock(SQLITE_LOCK_NONE): close the query cursor
-          - any use of page_count_ outside of the outer txn should be replaced with detection
+          - when we get Lock(SQLITE_LOCK_SHARED): open some read cursor on the outer db
+          - when we get Lock(SQLITE_LOCK_EXCLUSIVE): BEGIN EXCLUSIVE txn on outer db
+          - when we get xUnlock(SQLITE_LOCK_SHARED): Sync() if needed (usually will have already)
+          - when we get xUnlock(SQLITE_LOCK_NONE): close the read cursor we'd opened
         Holding the open cursor is supposed to ensure outer db lock only downgrades from EXCLUSIVE
         to SHARED upon txn commit, rather than releasing entirely. Testing of all this will be
         tricky, so we've punted on it for now.
@@ -523,11 +519,15 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         return SQLITE_OK;
     }
     int Unlock(int eLock) override {
-        try {
-            cursor_.Reset();
-        } catch (SQLite::Exception &exn) {
-            _DBG << exn.what() << _EOL;
-            return exn.getErrorCode();
+        if (eLock == SQLITE_LOCK_NONE) {
+            // wipe internal state that's liable to go stale after relinquishing read lock
+            page_count_ = 0;
+            try {
+                cursor_.Reset();
+            } catch (SQLite::Exception &exn) {
+                _DBG << exn.what() << _EOL;
+                return exn.getErrorCode();
+            }
         }
         return SQLITE_OK;
     }
@@ -537,7 +537,11 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     }
     int FileControl(int op, void *pArg) override { return SQLITE_NOTFOUND; }
     int SectorSize() override { return 0; }
-    int DeviceCharacteristics() override { return 0; }
+    int DeviceCharacteristics() override {
+        // we can support SQLITE_IOCAP_SEQUENTIAL and SQLITE_IOCAP_SAFE_APPEND, but these only help
+        // journals rather than the main database file (see SQLite pager.c)
+        return SQLITE_IOCAP_ATOMIC | SQLITE_IOCAP_POWERSAFE_OVERWRITE;
+    }
 
     int Close() override {
         try {
@@ -675,8 +679,7 @@ class VFS : public SQLiteVFS::Wrapper {
                     std::unique_ptr<SQLite::Database> outer_db(new SQLite::Database(
                         outer_db_uri, flags | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI, 0,
                         outer_vfs_));
-                    // need exclusive locking mode to protect InnerDatabaseFile::page_count_; see
-                    // discussion in Lock()
+                    // see comment in Lock() about possibe future relaxation of exclusive locking
                     outer_db->exec("PRAGMA locking_mode=EXCLUSIVE");
                     if (unsafe) {
                         outer_db->exec(UNSAFE_PRAGMAS);
