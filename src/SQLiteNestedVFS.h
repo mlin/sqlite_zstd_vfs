@@ -47,7 +47,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     };
 
     std::unique_ptr<SQLite::Database> outer_db_;
-    std::string inner_db_tablename_prefix_; // can be overridden in VFS, not here
+    std::string inner_db_pages_table_;
     bool read_only_;
 
     /**********************************************************************************************
@@ -85,8 +85,10 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     // Update page_size_ (a property of the inner db, immutable once set on first write) based on
     // some inspection of outer db. Leave at zero if the inner db is still new. Default logic takes
     // the size of the data for the first page; subclasses may override.
+    bool page1plain_ = true; // subclass override if page 1 isn't stored "plaintext"
     virtual size_t DetectPageSize() {
         if (!page_size_ && DetectPageCount()) {
+            assert(page1plain_);
             cursor_.Seek(1);
             int sz = cursor_.getColumn(1).getBytes();
             if (sz <= 0 || sz > 65536) {
@@ -101,8 +103,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     bool VerifyPageCount() {
         // integrity check: page indices are sequential [1..page_count_]
         sqlite3_int64 pageno_sum =
-            outer_db_->execAndGet("SELECT SUM(pageno) FROM " + inner_db_tablename_prefix_ + "pages")
-                .getInt64();
+            outer_db_->execAndGet("SELECT SUM(pageno) FROM " + inner_db_pages_table_).getInt64();
         return pageno_sum == page_count_ * (page_count_ + 1) / 2;
     }
 
@@ -181,6 +182,26 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         memcpy(dest, data.getBlob(), page_size_);
     }
 
+    void ReadPlainPage1(void *zBuf, int iAmt, int iOfst) {
+        assert(page1plain_ && iOfst + iAmt <= page_size_);
+        sqlite3_blob *pBlob = nullptr;
+        int rc = sqlite3_blob_open(outer_db_->getHandle(), "main", inner_db_pages_table_.c_str(),
+                                   "data", 1, 0, &pBlob);
+        if (rc != SQLITE_OK) {
+            throw SQLite::Exception("couldn't open page 1 blob", rc);
+        }
+        assert(sqlite3_blob_bytes(pBlob) == page_size_);
+        rc = sqlite3_blob_read(pBlob, zBuf, iAmt, iOfst);
+        if (rc != SQLITE_OK) {
+            sqlite3_blob_close(pBlob);
+            throw SQLite::Exception("couldn't read page 1 blob", rc);
+        }
+        rc = sqlite3_blob_close(pBlob);
+        if (rc != SQLITE_OK) {
+            throw SQLite::Exception("couldn't close page 1 blob", rc);
+        }
+    }
+
     int Read(void *zBuf, int iAmt, sqlite3_int64 iOfst) override {
         try {
             assert(iAmt >= 0);
@@ -204,23 +225,27 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
             // scan them
             for (sqlite3_int64 pageno = first_page; pageno <= last_page; ++pageno) {
-                cursor_.Seek(pageno);
                 int page_ofs = sofar == 0 ? iOfst % page_size_ : 0;
                 int desired = std::min(iAmt - sofar, (int)page_size_ - page_ofs);
-                if (page_ofs == 0 && desired == page_size_) {
-                    // aligned read of a whole page
-                    DecodePage(pageno, cursor_.getColumn(1), cursor_.getColumn(2),
-                               cursor_.getColumn(3), (uint8_t *)zBuf + sofar);
+                if (pageno == 1 && page1plain_) {
+                    // optimized read of "plaintext" page 1, possibly including non-aligned reads
+                    // (SQLite reading just the header or version number)
+                    ReadPlainPage1(zBuf, desired, page_ofs);
                 } else {
-                    // non-aligned read (happens when SQLite reads the db header)
-                    // TODO: optimize with incremental blob I/O, if we know page 1 is "plaintext"
-                    assert(pageno == 1);
-                    std::vector<char> pagebuf(page_size_, 0);
-                    DecodePage(pageno, cursor_.getColumn(1), cursor_.getColumn(2),
-                               cursor_.getColumn(3), pagebuf.data());
-                    memcpy((uint8_t *)zBuf + sofar, pagebuf.data() + page_ofs, desired);
+                    cursor_.Seek(pageno);
+                    if (page_ofs == 0 && desired == page_size_) {
+                        // aligned read of a whole page
+                        DecodePage(pageno, cursor_.getColumn(1), cursor_.getColumn(2),
+                                   cursor_.getColumn(3), (uint8_t *)zBuf + sofar);
+                    } else {
+                        // non-aligned read from non-plaintext page 1
+                        assert(pageno == 1);
+                        std::vector<char> pagebuf(page_size_, 0);
+                        DecodePage(pageno, cursor_.getColumn(1), cursor_.getColumn(2),
+                                   cursor_.getColumn(3), pagebuf.data());
+                        memcpy((uint8_t *)zBuf + sofar, pagebuf.data() + page_ofs, desired);
+                    }
                 }
-                // update sofar
                 sofar += desired;
                 assert(sofar <= iAmt);
             }
@@ -409,13 +434,13 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
             if (!insert_page_) {
                 insert_page_.reset(new SQLite::Statement(
-                    *outer_db_, "INSERT INTO " + inner_db_tablename_prefix_ +
-                                    "pages(data,meta1,meta2,pageno) VALUES(?,?,?,?)"));
+                    *outer_db_, "INSERT INTO " + inner_db_pages_table_ +
+                                    "(data,meta1,meta2,pageno) VALUES(?,?,?,?)"));
             }
             if (!update_page_) {
                 update_page_.reset(new SQLite::Statement(
-                    *outer_db_, "UPDATE " + inner_db_tablename_prefix_ +
-                                    "pages SET data=?, meta1=?, meta2=? WHERE pageno=?"));
+                    *outer_db_, "UPDATE " + inner_db_pages_table_ +
+                                    " SET data=?, meta1=?, meta2=? WHERE pageno=?"));
             }
 
             begin();
@@ -459,9 +484,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             }
 
             if (!delete_pages_) {
-                delete_pages_.reset(
-                    new SQLite::Statement(*outer_db_, "DELETE FROM " + inner_db_tablename_prefix_ +
-                                                          "pages WHERE pageno > ?"));
+                delete_pages_.reset(new SQLite::Statement(
+                    *outer_db_, "DELETE FROM " + inner_db_pages_table_ + " WHERE pageno > ?"));
             }
             delete_pages_->bind(1, new_page_count);
             StatementResetter resetter(*delete_pages_);
@@ -510,7 +534,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         respond to inner db lock calls. This can be relaxed in the future by:
           - when we get Lock(SQLITE_LOCK_SHARED): open some read cursor on the outer db
           - when we get Lock(SQLITE_LOCK_EXCLUSIVE): BEGIN EXCLUSIVE txn on outer db
-          - when we get xUnlock(SQLITE_LOCK_SHARED): Sync() if needed (usually will have already)
+          - when we get xUnlock(SQLITE_LOCK_SHARED): Sync() if needed (only if inner db has
+            PRAGMA synchronous=OFF)
           - when we get xUnlock(SQLITE_LOCK_NONE): close the read cursor we'd opened
         Holding the open cursor is supposed to ensure outer db lock only downgrades from EXCLUSIVE
         to SHARED upon txn commit, rather than releasing entirely. Testing of all this will be
@@ -538,8 +563,11 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     int FileControl(int op, void *pArg) override { return SQLITE_NOTFOUND; }
     int SectorSize() override { return 0; }
     int DeviceCharacteristics() override {
-        // we can support SQLITE_IOCAP_SEQUENTIAL and SQLITE_IOCAP_SAFE_APPEND, but these only help
-        // journals rather than the main database file (see SQLite pager.c)
+        // We could optimize small write transactions by supporting SQLITE_IOCAP_BATCH_ATOMIC, but
+        // there would be some tricky details to get just right, e.g. rollback commanded through
+        // FileControl.
+        // We can support SQLITE_IOCAP_SEQUENTIAL and SQLITE_IOCAP_SAFE_APPEND, but these only help
+        // journals rather than the main database file (see SQLite pager.c).
         return SQLITE_IOCAP_ATOMIC | SQLITE_IOCAP_POWERSAFE_OVERWRITE;
     }
 
@@ -596,11 +624,11 @@ class InnerDatabaseFile : public SQLiteVFS::File {
   public:
     InnerDatabaseFile(std::unique_ptr<SQLite::Database> &&outer_db,
                       const std::string &inner_db_tablename_prefix, bool read_only, size_t threads)
-        : outer_db_(std::move(outer_db)), inner_db_tablename_prefix_(inner_db_tablename_prefix),
-          read_only_(read_only),
+        : outer_db_(std::move(outer_db)),
+          inner_db_pages_table_(inner_db_tablename_prefix + "pages"), read_only_(read_only),
           // MAX(pageno) instead of COUNT(pageno) because the latter would trigger table scan
-          select_page_count_(*outer_db_, "SELECT IFNULL(MAX(pageno), 0) FROM " +
-                                             inner_db_tablename_prefix_ + "pages"),
+          select_page_count_(*outer_db_,
+                             "SELECT IFNULL(MAX(pageno), 0) FROM " + inner_db_pages_table_),
           cursor_(*outer_db_, inner_db_tablename_prefix), thread_pool_(threads, threads * 3) {
         methods_.iVersion = 1;
         assert(outer_db_->execAndGet("PRAGMA quick_check").getString() == "ok");
