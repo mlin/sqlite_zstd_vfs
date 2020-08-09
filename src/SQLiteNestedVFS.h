@@ -123,6 +123,19 @@ class InnerDatabaseFile : public SQLiteVFS::File {
      * Read() and helpers
      *********************************************************************************************/
 
+    // Decode one page from the blob stored in the outer db (page_size_ bytes out). Override me!
+    std::chrono::nanoseconds t_decode_ = std::chrono::nanoseconds::zero();
+    virtual void DecodePage(sqlite3_int64 pageno, const SQLite::Column &data,
+                            const SQLite::Column &meta1, const SQLite::Column &meta2, void *dest) {
+        if (!data.isBlob() || data.getBytes() != page_size_) {
+            std::string errmsg = "page " + std::to_string(pageno) +
+                                 " size = " + std::to_string(data.getBytes()) +
+                                 " expected = " + std::to_string(page_size_);
+            throw SQLite::Exception(errmsg, SQLITE_CORRUPT);
+        }
+        memcpy(dest, data.getBlob(), page_size_);
+    }
+
     // To optimize sequential page reads, we usually keep a cursor open to the next page after the
     // one last read; this internal struct manages the state for that. We must be careful to reset
     // it at certain times (e.g. when writing a page) to ensure the open cursor can't be stale.
@@ -174,17 +187,51 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     ReadCursor cursor_;
     sqlite3_int64 longest_read_ = 0;
 
-    // Decode one page from the blob stored in the outer db (page_size_ bytes out). Override me!
-    std::chrono::nanoseconds t_decode_ = std::chrono::nanoseconds::zero();
-    virtual void DecodePage(sqlite3_int64 pageno, const SQLite::Column &data,
-                            const SQLite::Column &meta1, const SQLite::Column &meta2, void *dest) {
-        if (!data.isBlob() || data.getBytes() != page_size_) {
-            std::string errmsg = "page " + std::to_string(pageno) +
-                                 " size = " + std::to_string(data.getBytes()) +
-                                 " expected = " + std::to_string(page_size_);
-            throw SQLite::Exception(errmsg, SQLITE_CORRUPT);
+    struct PageFetchJob {
+        sqlite3_int64 pageno;
+        void *dest;
+        bool done;
+        std::string errmsg;
+
+        void Reset() {
+            pageno = 0;
+            dest = nullptr;
+            done = false;
+            errmsg.clear();
         }
-        memcpy(dest, data.getBlob(), page_size_);
+
+        PageFetchJob() { Reset(); }
+    };
+
+    std::unique_ptr<std::thread> fetch_thread_;
+    std::mutex fetch_lock_;
+    std::condition_variable fetch_cv_;
+    bool fetch_shutdown_ = false;
+    std::unique_ptr<PageFetchJob> fetch_job_;
+
+    void FetchThread() {
+        std::unique_lock<std::mutex> lock(fetch_lock_);
+        while (true) {
+            while (!fetch_shutdown_ && (!fetch_job_ || fetch_job_->done)) {
+                fetch_cv_.wait(lock);
+            }
+            if (fetch_shutdown_) {
+                break;
+            }
+            assert(fetch_job_ && fetch_job_->pageno && !fetch_job_->done);
+            try {
+                cursor_.Seek(fetch_job_->pageno);
+                auto t0 = std::chrono::high_resolution_clock::now();
+                DecodePage(fetch_job_->pageno, cursor_.getColumn(1), cursor_.getColumn(2),
+                           cursor_.getColumn(3), fetch_job_->dest);
+                t_decode_ += std::chrono::high_resolution_clock::now() - t0;
+            } catch (std::exception &exn) {
+                fetch_job_->errmsg = exn.what();
+                _DBG << fetch_job_->errmsg << _EOL;
+            }
+            fetch_job_->done = true;
+            fetch_cv_.notify_all();
+        }
     }
 
     void ReadPlainPage1(void *zBuf, int iAmt, int iOfst) {
@@ -227,6 +274,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             sqlite3_int64 first_page = 1 + iOfst / page_size_,
                           last_page = first_page + (iAmt - 1) / page_size_;
             int sofar = 0;
+            std::vector<char> pagebuf;
 
             // scan them
             for (sqlite3_int64 pageno = first_page; pageno <= last_page; ++pageno) {
@@ -237,21 +285,33 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                     // (SQLite reading just the header or version number)
                     ReadPlainPage1(zBuf, desired, page_ofs);
                 } else {
-                    cursor_.Seek(pageno);
-                    auto t0 = std::chrono::high_resolution_clock::now();
-                    if (page_ofs == 0 && desired == page_size_) {
-                        // aligned read of a whole page
-                        DecodePage(pageno, cursor_.getColumn(1), cursor_.getColumn(2),
-                                   cursor_.getColumn(3), (uint8_t *)zBuf + sofar);
+                    bool whole = page_ofs == 0 && desired == page_size_;
+                    std::unique_lock<std::mutex> lock(fetch_lock_);
+                    assert(!fetch_job_);
+                    fetch_job_.reset(new PageFetchJob());
+                    fetch_job_->pageno = pageno;
+                    if (whole) {
+                        fetch_job_->dest = (uint8_t *)zBuf + sofar;
                     } else {
-                        // non-aligned read from non-plaintext page 1
                         assert(pageno == 1);
-                        std::vector<char> pagebuf(page_size_, 0);
-                        DecodePage(pageno, cursor_.getColumn(1), cursor_.getColumn(2),
-                                   cursor_.getColumn(3), pagebuf.data());
+                        pagebuf.resize(page_size_);
+                        fetch_job_->dest = pagebuf.data();
+                    }
+                    if (!fetch_thread_) {
+                        fetch_thread_.reset(new std::thread([this]() { this->FetchThread(); }));
+                    }
+                    fetch_cv_.notify_all();
+                    while (!fetch_job_->done) {
+                        fetch_cv_.wait(lock);
+                    }
+                    if (!fetch_job_->errmsg.empty()) {
+                        return SQLITE_IOERR_READ;
+                    }
+                    if (!whole) {
+                        assert(fetch_job_->dest == pagebuf.data());
                         memcpy((uint8_t *)zBuf + sofar, pagebuf.data() + page_ofs, desired);
                     }
-                    t_decode_ += std::chrono::high_resolution_clock::now() - t0;
+                    fetch_job_.reset();
                 }
                 sofar += desired;
                 assert(sofar <= iAmt);
@@ -581,6 +641,14 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     int Close() override {
         try {
             cursor_.Reset();
+            if (fetch_thread_) {
+                {
+                    std::unique_lock<std::mutex> lock(fetch_lock_);
+                    fetch_shutdown_ = true;
+                    fetch_cv_.notify_all();
+                }
+                fetch_thread_->join();
+            }
             if (!read_only_) {
                 int rc;
                 if ((rc = Sync(0)) != SQLITE_OK) { // includes FinishUpserts
