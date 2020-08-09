@@ -12,6 +12,7 @@
 #include "SQLiteCpp/SQLiteCpp.h"
 #include "SQLiteVFS.h"
 #include "ThreadPool.h"
+#include <chrono>
 #include <cstdint>
 #include <libgen.h>
 #include <memory>
@@ -129,6 +130,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         SQLite::Statement select_pages_;
         sqlite3_int64 pageno_ = 0;
         sqlite3_int64 sequential_ = 0, non_sequential_ = 0;
+        std::chrono::nanoseconds t_seek_ = std::chrono::nanoseconds::zero();
 
         ReadCursor(SQLite::Database &db, const std::string &inner_db_tablename_prefix)
             : select_pages_(db, "SELECT pageno, data, meta1, meta2 FROM " +
@@ -144,6 +146,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
         void Seek(sqlite3_int64 pageno) {
             assert(pageno > 0);
+            auto t0 = std::chrono::high_resolution_clock::now();
             if (pageno_ && pageno == pageno_ + 1) {
                 sequential_++;
             } else {
@@ -160,6 +163,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 Reset();
                 throw;
             }
+            t_seek_ += std::chrono::high_resolution_clock::now() - t0;
             assert(select_pages_.getColumn(0).isInteger());
             assert(select_pages_.getColumn(0).getInt64() == pageno);
             assert(select_pages_.getColumn(1).isBlob());
@@ -171,6 +175,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     sqlite3_int64 longest_read_ = 0;
 
     // Decode one page from the blob stored in the outer db (page_size_ bytes out). Override me!
+    std::chrono::nanoseconds t_decode_ = std::chrono::nanoseconds::zero();
     virtual void DecodePage(sqlite3_int64 pageno, const SQLite::Column &data,
                             const SQLite::Column &meta1, const SQLite::Column &meta2, void *dest) {
         if (!data.isBlob() || data.getBytes() != page_size_) {
@@ -233,6 +238,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                     ReadPlainPage1(zBuf, desired, page_ofs);
                 } else {
                     cursor_.Seek(pageno);
+                    auto t0 = std::chrono::high_resolution_clock::now();
                     if (page_ofs == 0 && desired == page_size_) {
                         // aligned read of a whole page
                         DecodePage(pageno, cursor_.getColumn(1), cursor_.getColumn(2),
@@ -245,6 +251,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                                    cursor_.getColumn(3), pagebuf.data());
                         memcpy((uint8_t *)zBuf + sofar, pagebuf.data() + page_ofs, desired);
                     }
+                    t_decode_ += std::chrono::high_resolution_clock::now() - t0;
                 }
                 sofar += desired;
                 assert(sofar <= iAmt);
@@ -563,12 +570,12 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     int FileControl(int op, void *pArg) override { return SQLITE_NOTFOUND; }
     int SectorSize() override { return 0; }
     int DeviceCharacteristics() override {
+        return SQLITE_IOCAP_ATOMIC | SQLITE_IOCAP_POWERSAFE_OVERWRITE;
         // We could optimize small write transactions by supporting SQLITE_IOCAP_BATCH_ATOMIC, but
         // there would be some tricky details to get just right, e.g. rollback commanded through
         // FileControl.
-        // We can support SQLITE_IOCAP_SEQUENTIAL and SQLITE_IOCAP_SAFE_APPEND, but these only help
-        // journals rather than the main database file (see SQLite pager.c).
-        return SQLITE_IOCAP_ATOMIC | SQLITE_IOCAP_POWERSAFE_OVERWRITE;
+        // We can easily support SQLITE_IOCAP_SEQUENTIAL and SQLITE_IOCAP_SAFE_APPEND, but these
+        // don't help the main database file, only journals.
     }
 
     int Close() override {
@@ -589,6 +596,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             _DBG << "reads sequential: " << cursor_.sequential_
                  << " non-sequential: " << cursor_.non_sequential_ << " longest: " << longest_read_
                  << _EOL;
+            _DBG << "seek time: " << cursor_.t_seek_.count() / 1000000
+                 << "ms decode time: " << t_decode_.count() / 1000000 << "ms" << _EOL;
         }
         return SQLiteVFS::File::Close();
     }

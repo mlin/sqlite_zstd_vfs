@@ -14,7 +14,6 @@
 #include "SQLiteNestedVFS.h"
 #include "zdict.h"
 #include "zstd.h"
-#include <chrono>
 #include <map>
 #include <random>
 #include <set>
@@ -222,10 +221,9 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             cur_dict_ = dict_id;
             cur_dict_page_count_ = dict_page_count;
             cur_dict_pages_written_ = 0;
-            std::chrono::duration<double, std::milli> t =
-                std::chrono::high_resolution_clock::now() - t0;
-            _DBG << "dict " << dict_id << " @ " << dict_page_count << " " << t.count() << "ms"
-                 << _EOL;
+            std::chrono::nanoseconds t = std::chrono::high_resolution_clock::now() - t0;
+            _DBG << "dict " << dict_id << " @ " << dict_page_count << " " << t.count() / 1000000
+                 << "ms" << _EOL;
         }
     }
 
