@@ -97,6 +97,11 @@ class ThreadPool {
     // Enqueue ser(par(x)) for background processing as described. The functions must not throw.
     void Enqueue(void *x, std::function<void *(void *) noexcept> par,
                  std::function<void(void *) noexcept> ser) {
+        if (seqno_next_ == ULLONG_MAX) { // pedantic
+            Barrier();
+            seqno_next_ = 0;
+        }
+
         Job job;
         job.x = x;
         job.par = par;

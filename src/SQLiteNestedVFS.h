@@ -90,8 +90,9 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     virtual size_t DetectPageSize() {
         if (!page_size_ && DetectPageCount()) {
             assert(page1plain_);
-            cursor_.Seek(1);
-            int sz = cursor_.getColumn(1).getBytes();
+            ReadCursor cursor(*outer_db_, inner_db_pages_table_);
+            cursor.Seek(1);
+            int sz = cursor.getColumn(1).getBytes();
             if (sz <= 0 || sz > 65536) {
                 throw SQLite::Exception("invalid page size in nested VFS page table",
                                         SQLITE_CORRUPT);
@@ -142,19 +143,20 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     struct ReadCursor {
         SQLite::Statement select_pages_;
         sqlite3_int64 pageno_ = 0;
+        unsigned long long last_op_ = 0;
         sqlite3_int64 sequential_ = 0, non_sequential_ = 0;
         std::chrono::nanoseconds t_seek_ = std::chrono::nanoseconds::zero();
 
-        ReadCursor(SQLite::Database &db, const std::string &inner_db_tablename_prefix)
-            : select_pages_(db, "SELECT pageno, data, meta1, meta2 FROM " +
-                                    inner_db_tablename_prefix +
-                                    "pages WHERE pageno >= ? ORDER BY pageno") {}
+        ReadCursor(SQLite::Database &db, const std::string &table)
+            : select_pages_(db, "SELECT pageno, data, meta1, meta2 FROM " + table +
+                                    " WHERE pageno >= ? ORDER BY pageno") {}
 
         void Reset() {
             if (pageno_ > 0) {
                 select_pages_.reset();
                 pageno_ = 0;
             }
+            last_op_ = 0;
         }
 
         void Seek(sqlite3_int64 pageno) {
@@ -184,8 +186,31 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
         SQLite::Column getColumn(int idx) { return select_pages_.getColumn(idx); }
     };
-    ReadCursor cursor_;
+    std::vector<ReadCursor> cursors_;
+    const int MAX_CURSORS = 4;
+    unsigned long long read_opcount_ = 0;
     sqlite3_int64 longest_read_ = 0;
+
+    // Pick the cursor already positioned to read pageno, if any; otherwise, pick the LRU one
+    ReadCursor &PickCursor(sqlite3_int64 pageno) {
+        assert(!cursors_.empty());
+        ReadCursor *ans = &cursors_[0];
+        for (auto &cursor : cursors_) {
+            if (cursor.pageno_ && cursor.pageno_ + 1 == pageno) {
+                return cursor;
+            }
+            if (cursor.last_op_ <= ans->last_op_) {
+                ans = &cursor;
+            }
+        }
+        return *ans;
+    }
+
+    void ResetCursors() {
+        // this will become PrefetchBarrier()
+        std::lock_guard<std::mutex> lock(fetch_lock_);
+        reset_cursors_ = true;
+    }
 
     struct PageFetchJob {
         sqlite3_int64 pageno;
@@ -206,11 +231,16 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     std::unique_ptr<std::thread> fetch_thread_;
     std::mutex fetch_lock_;
     std::condition_variable fetch_cv_;
-    bool fetch_shutdown_ = false;
+    bool fetch_shutdown_ = false, reset_cursors_ = false;
     std::unique_ptr<PageFetchJob> fetch_job_;
 
     void FetchThread() {
         std::unique_lock<std::mutex> lock(fetch_lock_);
+        if (cursors_.empty()) {
+            for (int i = 0; i < MAX_CURSORS; ++i) {
+                cursors_.emplace_back(*outer_db_, inner_db_pages_table_);
+            }
+        }
         while (true) {
             while (!fetch_shutdown_ && (!fetch_job_ || fetch_job_->done)) {
                 fetch_cv_.wait(lock);
@@ -219,11 +249,23 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 break;
             }
             assert(fetch_job_ && fetch_job_->pageno && !fetch_job_->done);
+            if (read_opcount_ == ULLONG_MAX) { // pedantic
+                reset_cursors_ = true;
+                read_opcount_ = 0;
+            }
             try {
-                cursor_.Seek(fetch_job_->pageno);
+                if (reset_cursors_) {
+                    for (auto &cursor : cursors_) {
+                        cursor.Reset();
+                    }
+                    reset_cursors_ = false;
+                }
+                ReadCursor &cursor = PickCursor(fetch_job_->pageno);
+                cursor.Seek(fetch_job_->pageno);
+                cursor.last_op_ = ++read_opcount_;
                 auto t0 = std::chrono::high_resolution_clock::now();
-                DecodePage(fetch_job_->pageno, cursor_.getColumn(1), cursor_.getColumn(2),
-                           cursor_.getColumn(3), fetch_job_->dest);
+                DecodePage(fetch_job_->pageno, cursor.getColumn(1), cursor.getColumn(2),
+                           cursor.getColumn(3), fetch_job_->dest);
                 t_decode_ += std::chrono::high_resolution_clock::now() - t0;
             } catch (std::exception &exn) {
                 fetch_job_->errmsg = exn.what();
@@ -487,7 +529,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         assert(iAmt >= 0);
         assert(!read_only_);
         try {
-            cursor_.Reset();
+            ResetCursors();
             if (!iAmt) {
                 return SQLITE_OK;
             }
@@ -537,7 +579,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     int Truncate(sqlite3_int64 size) override {
         assert(!read_only_);
         try {
-            cursor_.Reset();
+            ResetCursors();
             FinishUpserts();
             if (!DetectPageSize()) {
                 return size == 0 ? SQLITE_OK : SQLITE_IOERR_TRUNCATE;
@@ -615,7 +657,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             // wipe internal state that's liable to go stale after relinquishing read lock
             page_count_ = 0;
             try {
-                cursor_.Reset();
+                ResetCursors();
             } catch (SQLite::Exception &exn) {
                 _DBG << exn.what() << _EOL;
                 return exn.getErrorCode();
@@ -640,7 +682,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
     int Close() override {
         try {
-            cursor_.Reset();
+            ResetCursors();
             if (fetch_thread_) {
                 {
                     std::unique_lock<std::mutex> lock(fetch_lock_);
@@ -660,11 +702,17 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             _DBG << exn.what() << _EOL;
             return exn.getErrorCode();
         }
-        if (cursor_.sequential_ + cursor_.non_sequential_) {
-            _DBG << "reads sequential: " << cursor_.sequential_
-                 << " non-sequential: " << cursor_.non_sequential_ << " longest: " << longest_read_
-                 << _EOL;
-            _DBG << "seek time: " << cursor_.t_seek_.count() / 1000000
+        unsigned long long sequential = 0, non_sequential = 0;
+        std::chrono::nanoseconds t_seek = std::chrono::nanoseconds::zero();
+        for (const auto &cursor : cursors_) {
+            sequential += cursor.sequential_;
+            non_sequential += cursor.non_sequential_;
+            t_seek += cursor.t_seek_;
+        }
+        if (sequential + non_sequential) {
+            _DBG << "reads sequential: " << sequential << " non-sequential: " << non_sequential
+                 << " longest: " << longest_read_ << _EOL;
+            _DBG << "seek time: " << t_seek.count() / 1000000
                  << "ms decode time: " << t_decode_.count() / 1000000 << "ms" << _EOL;
         }
         return SQLiteVFS::File::Close();
@@ -706,7 +754,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
           // MAX(pageno) instead of COUNT(pageno) because the latter would trigger table scan
           select_page_count_(*outer_db_,
                              "SELECT IFNULL(MAX(pageno), 0) FROM " + inner_db_pages_table_),
-          cursor_(*outer_db_, inner_db_tablename_prefix), thread_pool_(threads, threads * 3) {
+          thread_pool_(threads, threads * 3) {
         methods_.iVersion = 1;
         assert(outer_db_->execAndGet("PRAGMA quick_check").getString() == "ok");
     }
