@@ -75,8 +75,8 @@ class ThreadPool {
                     lock.lock();
                 }
                 ++seqno_done_;
-                cv_done_.notify_all();
             }
+            cv_done_.notify_all();
         }
     }
 
@@ -113,6 +113,7 @@ class ThreadPool {
         }
         job.seqno = seqno_next_++;
         par_queue_.push(job);
+        lock.unlock();
         cv_enqueue_.notify_one();
         if (threads_.size() < max_threads_ && threads_.size() < par_queue_.size()) {
             threads_.emplace_back([this]() { this->Worker(); });

@@ -148,9 +148,8 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
 
         // Perform decompression using dctx & ddict
         void DecodePage() override {
+            assert(src && src_size);
             auto t0 = std::chrono::high_resolution_clock::now();
-            SQLite::Column data = cursor.getColumn(1);
-            assert(data.isBlob() && std::string(data.getName()) == "data");
             if (plain) { // uncompressed page
                 return super::PageFetchJob::DecodePage();
             }
@@ -162,11 +161,10 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             }
             size_t zrc;
             if (ddict) {
-                zrc = ZSTD_decompress_usingDDict(dctx, EffectiveDest(), page_size, data.getBlob(),
-                                                 data.getBytes(), ddict);
+                zrc = ZSTD_decompress_usingDDict(dctx, EffectiveDest(), page_size, src, src_size,
+                                                 ddict);
             } else {
-                zrc = ZSTD_decompressDCtx(dctx, EffectiveDest(), page_size, data.getBlob(),
-                                          data.getBytes());
+                zrc = ZSTD_decompressDCtx(dctx, EffectiveDest(), page_size, src, src_size);
             }
             if (zrc != page_size) {
                 throw SQLite::Exception("zstd page decompression failed", SQLITE_CORRUPT);

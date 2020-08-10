@@ -155,6 +155,9 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         std::vector<char> decodebuf;
         std::string errmsg;
 
+        const void *src = nullptr;
+        int src_size = 0;
+
         // counters
         sqlite3_int64 sequential = 0, non_sequential = 0;
         std::chrono::nanoseconds t_seek = std::chrono::nanoseconds::zero(),
@@ -174,6 +177,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             state = State::NEW;
             pageno = 0;
             dest = nullptr;
+            src = nullptr;
+            src_size = 0;
             errmsg.clear();
         }
 
@@ -206,8 +211,10 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 throw SQLite::Exception("page missing", SQLITE_CORRUPT);
             }
             cursor_pageno = pageno;
-            assert(cursor.getColumn(0).isInteger());
-            assert(cursor.getColumn(1).isBlob());
+            SQLite::Column data = cursor.getColumn(1);
+            assert(data.isBlob() && data.getName() == std::string("data"));
+            src = data.getBlob();
+            src_size = data.getBytes();
             t_seek += std::chrono::high_resolution_clock::now() - t0;
         }
 
@@ -219,15 +226,13 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         // Runs on any background thread.
         virtual void DecodePage() {
             auto t0 = std::chrono::high_resolution_clock::now();
-            SQLite::Column data = cursor.getColumn(1);
-            assert(std::string(data.getName()) == "data");
-            if (!data.isBlob() || data.getBytes() != page_size) {
+            if (!src || src_size != page_size) {
                 throw SQLite::Exception("page " + std::to_string(pageno) +
-                                            " size = " + std::to_string(data.getBytes()) +
+                                            " size = " + std::to_string(src_size) +
                                             " expected = " + std::to_string(page_size),
                                         SQLITE_CORRUPT);
             }
-            memcpy(EffectiveDest(), data.getBlob(), page_size);
+            memcpy(EffectiveDest(), src, src_size);
             t_decode += std::chrono::high_resolution_clock::now() - t0;
         }
     };
@@ -250,10 +255,12 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     // Routine for background-fetching one page, enqueued for each new job. It executes the next
     // job in the queue, which isn't necessarily the one it was enqueued concomitantly with.
     void *BackgroundFetchJob() {
-        std::unique_lock<std::mutex> lock(fetch_lock_);
-        // pick a job to work on. if a job has dest != nullptr, it's considered "urgent" i.e. the
-        // foreground thread is currently waiting for it.
+        // acquire seek_lock_, then fetch_lock_:
+        std::unique_lock<std::mutex> seek_lock(seek_lock_);
+        std::unique_lock<std::mutex> fetch_lock(fetch_lock_);
         PageFetchJob *job = nullptr;
+        // pick a job to work on. if a job has dest != nullptr, it's considered "urgent" i.e.
+        // the foreground thread is currently waiting for it.
         for (auto job_i = fetch_jobs_.begin(); job_i != fetch_jobs_.end(); job_i++) {
             if ((*job_i)->state == PageFetchJob::State::QUEUE && ((*job_i)->dest || !job)) {
                 job = job_i->get();
@@ -263,13 +270,10 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             return nullptr; // aborted by PrefetchBarrier()
         }
         job->state = PageFetchJob::State::WIP;
-        // lock.unlock();
+        fetch_lock.unlock();
         try {
-            {
-                // serialize fetching the page from the outer db, but not its decoding
-                // std::lock_guard<std::mutex> seeking(seek_lock_);
-                job->SeekCursor();
-            }
+            job->SeekCursor();
+            seek_lock.unlock();
             assert(job->cursor_pageno == job->pageno);
             job->DecodePage();
         } catch (std::exception &exn) {
@@ -277,8 +281,9 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             _DBG << job->errmsg << _EOL;
             job->cursor_pageno = 0;
         }
-        // lock.lock();
+        fetch_lock.lock();
         job->state = PageFetchJob::State::DONE;
+        fetch_lock.unlock();
         fetch_cv_.notify_all();
         return nullptr;
     }
