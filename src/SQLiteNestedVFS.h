@@ -17,6 +17,7 @@
 #include "SQLiteCpp/SQLiteCpp.h"
 #include "SQLiteVFS.h"
 #include "ThreadPool.h"
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <libgen.h>
@@ -141,7 +142,9 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     // Subclasses may in turn subclass this to add their own logic to SeekCursor and DecodePage.
     struct PageFetchJob {
         enum State { NEW, QUEUE, WIP, DONE };
-        State state = NEW;
+        std::atomic<State> _state;
+        State GetState() { return _state.load(std::memory_order_acquire); }
+        void PutState(State st) { _state.store(st, std::memory_order_release); }
         sqlite3_int64 pageno = 0;
         size_t page_size;
 
@@ -167,14 +170,16 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             : cursor(*(that.outer_db_), "SELECT pageno, data, meta1, meta2 FROM " +
                                             that.inner_db_pages_table_ +
                                             " WHERE pageno >= ? ORDER BY pageno"),
-              page_size(that.page_size_) {}
+              page_size(that.page_size_) {
+            PutState(State::NEW);
+        }
 
         virtual ~PageFetchJob() {}
 
         // prepare job for reuse (keep cursor & decodebuf)
         virtual void Renew() {
-            assert(state != State::WIP);
-            state = State::NEW;
+            assert(GetState() != State::WIP);
+            PutState(State::NEW);
             pageno = 0;
             dest = nullptr;
             src = nullptr;
@@ -245,7 +250,6 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     int max_fetch_jobs_ = 4;
     std::vector<std::unique_ptr<PageFetchJob>> fetch_jobs_;
     std::mutex fetch_lock_, seek_lock_;
-    std::condition_variable fetch_cv_;
 
     unsigned long long read_opcount_ = 0, prefetch_wins_ = 0;
     sqlite3_int64 longest_read_ = 0;
@@ -262,14 +266,14 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         // pick a job to work on. if a job has dest != nullptr, it's considered "urgent" i.e.
         // the foreground thread is currently waiting for it.
         for (auto job_i = fetch_jobs_.begin(); job_i != fetch_jobs_.end(); job_i++) {
-            if ((*job_i)->state == PageFetchJob::State::QUEUE && ((*job_i)->dest || !job)) {
+            if ((*job_i)->GetState() == PageFetchJob::State::QUEUE && ((*job_i)->dest || !job)) {
                 job = job_i->get();
             }
         }
         if (!job) {
             return nullptr; // aborted by PrefetchBarrier()
         }
-        job->state = PageFetchJob::State::WIP;
+        job->PutState(PageFetchJob::State::WIP);
         fetch_lock.unlock();
         try {
             job->SeekCursor();
@@ -281,10 +285,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             _DBG << job->errmsg << _EOL;
             job->cursor_pageno = 0;
         }
-        fetch_lock.lock();
-        job->state = PageFetchJob::State::DONE;
-        fetch_lock.unlock();
-        fetch_cv_.notify_all();
+        job->PutState(PageFetchJob::State::DONE);
         return nullptr;
     }
 
@@ -293,7 +294,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         {
             std::lock_guard<std::mutex> lock(fetch_lock_);
             for (auto &job : fetch_jobs_) {
-                if (job->state != PageFetchJob::State::WIP) {
+                if (job->GetState() != PageFetchJob::State::WIP) {
                     job->Renew();
                 }
             }
@@ -302,8 +303,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
         // Reset all fetch jobs and cursors
         for (auto &job : fetch_jobs_) {
-            assert(job->state != PageFetchJob::State::QUEUE &&
-                   job->state != PageFetchJob::State::WIP);
+            assert(job->GetState() != PageFetchJob::State::QUEUE &&
+                   job->GetState() != PageFetchJob::State::WIP);
             job->Renew();
             job->ResetCursor();
         }
@@ -321,14 +322,14 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         PageFetchJob *job = nullptr;
         for (auto job_i = fetch_jobs_.begin(); job_i != fetch_jobs_.end(); job_i++) {
             if ((*job_i)->pageno == pageno) {
-                assert((*job_i)->state != PageFetchJob::State::NEW);
+                assert((*job_i)->GetState() != PageFetchJob::State::NEW);
                 job = job_i->get();
             }
         }
 
         if (job) {
             // YES: if it's not yet in-progress, promote it to "urgent"
-            if (job->state == PageFetchJob::State::QUEUE) {
+            if (job->GetState() == PageFetchJob::State::QUEUE) {
                 assert(!job->dest);
                 job->dest = dest;
             } else {
@@ -340,7 +341,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             fetch_thread_pool_.Enqueue(
                 nullptr, [this](void *) { return this->BackgroundFetchJob(); }, nullptr);
             for (auto job_i = fetch_jobs_.begin(); job_i != fetch_jobs_.end(); job_i++) {
-                if ((*job_i)->state == PageFetchJob::State::NEW) {
+                if ((*job_i)->GetState() == PageFetchJob::State::NEW) {
                     if ((*job_i)->cursor_pageno + 1 == pageno) {
                         job = job_i->get();
                         break;
@@ -357,13 +358,14 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             // enqueue
             job->pageno = pageno;
             job->dest = dest;
-            job->state = PageFetchJob::State::QUEUE;
+            job->PutState(PageFetchJob::State::QUEUE);
         }
         job->last_op = ++read_opcount_;
 
-        // wait for the job
-        while (job->state != PageFetchJob::State::DONE) {
-            fetch_cv_.wait(lock);
+        // semi-busy-wait
+        lock.unlock();
+        while (job->GetState() != PageFetchJob::State::DONE) {
+            std::this_thread::yield();
         }
         if (!job->errmsg.empty()) {
             job->Renew();
