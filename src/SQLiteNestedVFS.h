@@ -263,11 +263,11 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             return nullptr; // aborted by PrefetchBarrier()
         }
         job->state = PageFetchJob::State::WIP;
-        //lock.unlock();
+        // lock.unlock();
         try {
             {
                 // serialize fetching the page from the outer db, but not its decoding
-                //std::lock_guard<std::mutex> seeking(seek_lock_);
+                // std::lock_guard<std::mutex> seeking(seek_lock_);
                 job->SeekCursor();
             }
             assert(job->cursor_pageno == job->pageno);
@@ -277,7 +277,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             _DBG << job->errmsg << _EOL;
             job->cursor_pageno = 0;
         }
-        //lock.lock();
+        // lock.lock();
         job->state = PageFetchJob::State::DONE;
         fetch_cv_.notify_all();
         return nullptr;
@@ -426,7 +426,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                     // (SQLite reading just the header or version number)
                     ReadPlainPage1(zBuf, desired, page_ofs);
                 } else {
-                    bool partial = page_ofs == 0 && desired == page_size_;
+                    bool partial = page_ofs != 0 || desired != page_size_;
                     void *dest = (char *)zBuf + sofar;
                     Read1Page((partial ? (pagebuf.resize(page_size_), pagebuf.data()) : dest),
                               pageno);
