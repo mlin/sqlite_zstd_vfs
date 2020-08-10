@@ -134,8 +134,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
     // Holds state for a background page fetch: reading it from the outer database and decoding it.
     // Several tricky bits:
-    // 1. Interactions with the outer database must be serialized, while decoding operations may
-    //    parallelize.
+    // 1. Interactions with the outer database must be serialized, while decoding may parallelize.
     // 2. After seeking to a page, keep the cursor open and later reuse it if asked for the next
     //    sequential page.
     // 3. The foreground thread can inspect the queued jobs and "promote" one it wants done ASAP.
@@ -158,6 +157,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
         // counters
         sqlite3_int64 sequential = 0, non_sequential = 0;
+        std::chrono::nanoseconds t_seek = std::chrono::nanoseconds::zero(),
+                                 t_decode = std::chrono::nanoseconds::zero();
 
         PageFetchJob(InnerDatabaseFile &that)
             : cursor(*(that.outer_db_), "SELECT pageno, data, meta1, meta2 FROM " +
@@ -188,6 +189,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         // move cursor to pageno, by next() if possible, otherwise from scratch. runs on a
         // background thread that serializes such operations.
         virtual void SeekCursor() {
+            auto t0 = std::chrono::high_resolution_clock::now();
             assert(pageno > 0);
             assert(errmsg.empty());
             if (cursor_pageno == pageno) {
@@ -206,6 +208,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             cursor_pageno = pageno;
             assert(cursor.getColumn(0).isInteger());
             assert(cursor.getColumn(1).isBlob());
+            t_seek += std::chrono::high_resolution_clock::now() - t0;
         }
 
         void *EffectiveDest() {
@@ -215,6 +218,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         // Decode one page from the blob stored in the outer db. Override me!
         // Runs on any background thread.
         virtual void DecodePage() {
+            auto t0 = std::chrono::high_resolution_clock::now();
             SQLite::Column data = cursor.getColumn(1);
             assert(std::string(data.getName()) == "data");
             if (!data.isBlob() || data.getBytes() != page_size) {
@@ -224,6 +228,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                                         SQLITE_CORRUPT);
             }
             memcpy(EffectiveDest(), data.getBlob(), page_size);
+            t_decode += std::chrono::high_resolution_clock::now() - t0;
         }
     };
 
@@ -242,8 +247,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
     ThreadPool fetch_thread_pool_;
 
-    // Background thread logic, enqueued for each new job. It executes the next job in the queue,
-    // not necessarily the one it was enqueued concomitantly with.
+    // Routine for background-fetching one page, enqueued for each new job. It executes the next
+    // job in the queue, which isn't necessarily the one it was enqueued concomitantly with.
     void *BackgroundFetchJob() {
         std::unique_lock<std::mutex> lock(fetch_lock_);
         // pick a job to work on. if a job has dest != nullptr, it's considered "urgent" i.e. the
@@ -769,13 +774,18 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             return exn.getErrorCode();
         }
         unsigned long long sequential = 0, non_sequential = 0;
+        std::chrono::nanoseconds t_seek = std::chrono::nanoseconds::zero(),
+                                 t_decode = std::chrono::nanoseconds::zero();
         for (const auto &job : fetch_jobs_) {
             sequential += job->sequential;
             non_sequential += job->non_sequential;
+            t_seek += job->t_seek;
+            t_decode += job->t_decode;
         }
         if (sequential + non_sequential) {
             _DBG << "reads sequential: " << sequential << " non-sequential: " << non_sequential
-                 << " longest: " << longest_read_ << _EOL;
+                 << " longest: " << longest_read_ << " seek: " << t_seek.count() / 1000000
+                 << "ms decode: " << t_decode.count() / 1000000 << "ms" << _EOL;
         }
         return SQLiteVFS::File::Close();
     }

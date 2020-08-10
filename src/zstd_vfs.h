@@ -129,6 +129,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
         // need to load it from the outer db.
         void SeekCursor() override {
             super::PageFetchJob::SeekCursor();
+            auto t0 = std::chrono::high_resolution_clock::now();
             ddict = nullptr;
             plain = false;
             auto meta1 = cursor.getColumn(2);
@@ -142,10 +143,12 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
                 throw SQLite::Exception("unexpected meta1 entry in zstd page table",
                                         SQLITE_CORRUPT);
             }
+            t_seek += std::chrono::high_resolution_clock::now() - t0;
         }
 
         // Perform decompression using dctx & ddict
         void DecodePage() override {
+            auto t0 = std::chrono::high_resolution_clock::now();
             SQLite::Column data = cursor.getColumn(1);
             assert(data.isBlob() && std::string(data.getName()) == "data");
             if (plain) { // uncompressed page
@@ -168,6 +171,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             if (zrc != page_size) {
                 throw SQLite::Exception("zstd page decompression failed", SQLITE_CORRUPT);
             }
+            t_decode += std::chrono::high_resolution_clock::now() - t0;
         }
     };
 
@@ -233,7 +237,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             std::vector<char> pages(dict_training_pages_ * page_size_);
             for (int i = 0; i < dict_training_pages_; ++i) {
                 // TODO: initiate prefetch of subsequent pages
-                Read1Page(&pages[i * page_size_], page_indices[i]+1);
+                Read1Page(&pages[i * page_size_], page_indices[i] + 1);
             }
 
             // build dict from the pages
