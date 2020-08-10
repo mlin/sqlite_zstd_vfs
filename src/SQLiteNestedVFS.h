@@ -200,7 +200,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             if (cursor_pageno == pageno) {
                 return;
             }
-            if (cursor_pageno && cursor_pageno + 1 == pageno) {
+            if (cursor_pageno + 1 == pageno && cursor_pageno) {
                 sequential++;
             } else {
                 ResetCursor();
@@ -337,9 +337,11 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         } else {
             // NO: choose an idle job slot to use. Ideally one whose cursor is already positioned
             // correctly; otherwise, the least-recently used, or a new one if necessary.
+            fetch_thread_pool_.Enqueue(
+                nullptr, [this](void *) { return this->BackgroundFetchJob(); }, nullptr);
             for (auto job_i = fetch_jobs_.begin(); job_i != fetch_jobs_.end(); job_i++) {
                 if ((*job_i)->state == PageFetchJob::State::NEW) {
-                    if ((*job_i)->cursor_pageno && (*job_i)->cursor_pageno + 1 == pageno) {
+                    if ((*job_i)->cursor_pageno + 1 == pageno) {
                         job = job_i->get();
                         break;
                     }
@@ -356,8 +358,6 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             job->pageno = pageno;
             job->dest = dest;
             job->state = PageFetchJob::State::QUEUE;
-            fetch_thread_pool_.Enqueue(
-                nullptr, [this](void *) { return this->BackgroundFetchJob(); }, nullptr);
         }
         job->last_op = ++read_opcount_;
 
