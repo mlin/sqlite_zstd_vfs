@@ -268,7 +268,7 @@ def test_tpch(tmpdir):
             "--level",
             "6",
             "--threads",
-            "-1",
+            str(max(multiprocessing.cpu_count(), 2)),
         ],
         check=True,
         stdout=subprocess.PIPE,
