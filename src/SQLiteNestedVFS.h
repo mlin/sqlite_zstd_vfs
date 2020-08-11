@@ -145,12 +145,17 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     //    SQLite page (4-64 KiB) takes only 1-10 microseconds -- about 10x time to memcpy.
     // Subclasses may in turn subclass this to add their own logic to SeekCursor and DecodePage.
     struct PageFetchJob {
-        std::mutex lock;
-
-        enum State { NEW, QUEUE, DONE };
+        enum State { NEW, QUEUE, WIP, DONE };
+        // NEW = idle, QUEUE = ready & waiting, WIP = work in progress, DONE = complete or error
+        // QUEUE=>WIP is the only contentious transition; background threads and the main thread
+        // may all race (with an atomic CAS) to start the job. The winner later performs the
+        // WIP=>DONE transition. Other transitions are only performed by the main thread.
         std::atomic<State> _state;
-        State GetState() const { return _state.load(std::memory_order_acquire); }
-        void PutState(State st) { _state.store(st, std::memory_order_release); }
+        inline State GetState() const { return _state.load(std::memory_order_acquire); }
+        inline void PutState(State st) { _state.store(st, std::memory_order_release); }
+        inline bool TransitionState(State expected, State desired) {
+            return _state.compare_exchange_strong(expected, desired, std::memory_order_acq_rel);
+        }
         std::string errmsg; // nonempty = error
 
         sqlite3_int64 pageno = 0; // desired page
@@ -181,7 +186,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
         virtual ~PageFetchJob() {}
 
-        void *EffectiveDest() {
+        inline void *EffectiveDest() {
             return dest ? dest : (decodebuf.resize(page_size), decodebuf.data());
         }
 
@@ -265,6 +270,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         }
 
         virtual void Execute(std::unique_lock<std::mutex> &seek_lock) noexcept {
+            assert(GetState() == State::WIP);
             assert(seek_lock.owns_lock());
             try {
                 SeekCursor();
@@ -284,6 +290,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         return std::unique_ptr<PageFetchJob>(new PageFetchJob(*this));
     }
 
+    const int MAX_FETCH_CURSORS = 4;
     int max_fetch_jobs_;
     ThreadPool fetch_thread_pool_;
     std::vector<std::unique_ptr<PageFetchJob>> fetch_jobs_;
@@ -302,34 +309,11 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             std::this_thread::yield();
             seek_lock.lock();
         }
-        if (!job->lock.try_lock()) {
-            return nullptr; // they took our job!!!!!
-        }
-        std::lock_guard<std::mutex> job_lock(job->lock, std::adopt_lock);
-        if (job->GetState() != PageFetchJob::State::QUEUE) {
-            return nullptr; // they did our job!!!!!
+        if (!job->TransitionState(PageFetchJob::State::QUEUE, PageFetchJob::State::WIP)) {
+            return nullptr; // they took our job!!!!
         }
         job->Execute(seek_lock);
         return nullptr;
-    }
-
-    void PrefetchBarrier() {
-        // Abort prefetch jobs that haven't started yet
-        seek_interrupt_.store(true, std::memory_order_relaxed);
-        std::lock_guard<std::mutex> seek_lock(seek_lock_);
-        seek_interrupt_.store(false, std::memory_order_relaxed);
-        for (auto &job : fetch_jobs_) {
-            if (job->lock.try_lock()) {
-                job->Renew();
-                job->lock.unlock();
-            }
-        }
-        // Wait for remaining jobs to finish and clear them
-        for (auto &job : fetch_jobs_) {
-            std::lock_guard<std::mutex> lock(job->lock);
-            job->Renew();
-            job->ResetCursor();
-        }
     }
 
     // Read page #pageno into dest, if possible by using a previously-scheduled prefetch.
@@ -341,64 +325,68 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
         // Is there already a background job to prefetch the desired page?
         PageFetchJob *job = nullptr;
+        bool foreground = false;
         for (auto job_i = fetch_jobs_.begin(); job_i != fetch_jobs_.end(); job_i++) {
             if ((*job_i)->pageno == pageno) {
+                assert((*job_i)->GetState() > PageFetchJob::State::NEW);
                 job = job_i->get();
-                job->lock.lock();
-                assert((*job_i)->GetState() != PageFetchJob::State::NEW);
+                // If yes & it hasn't yet started, race to run it here in the foreground
+                foreground =
+                    job->TransitionState(PageFetchJob::State::QUEUE, PageFetchJob::State::WIP);
                 break;
             }
         }
 
-        // If not, create one; preferably using a pre-positioned cursor...
+        // If no outstanding prefetch, create one; preferably using a pre-positioned cursor...
         if (!job) {
             for (auto job_i = fetch_jobs_.begin(); job_i != fetch_jobs_.end(); job_i++) {
-                if ((*job_i)->GetState() != PageFetchJob::State::QUEUE) {
+                auto st = (*job_i)->GetState();
+                if (st == PageFetchJob::State::NEW || st == PageFetchJob::State::DONE) {
                     if ((*job_i)->cursor_pageno + 1 == pageno) {
                         job = job_i->get();
                         break;
                     }
-                    // ...or a cursor that isn't positioned, or lastly the LRU cursor
+                    // ...or a cursor that isn't positioned anywhere useful, or lastly the LRU
                     if (!job || (*job_i)->cursor_pageno == 0 || job->last_op > (*job_i)->last_op) {
                         job = job_i->get();
                     }
                 }
             }
-            if (!job || (fetch_jobs_.size() < max_fetch_jobs_ && job->cursor_pageno + 1 != pageno &&
-                         job->cursor_pageno)) {
-                assert(fetch_jobs_.size() < max_fetch_jobs_);
+            if (!job || (fetch_jobs_.size() < MAX_FETCH_CURSORS &&
+                         job->cursor_pageno + 1 != pageno && job->cursor_pageno)) {
+                assert(fetch_jobs_.size() < MAX_FETCH_CURSORS);
                 fetch_jobs_.push_back(NewPageFetchJob());
                 job = fetch_jobs_.back().get();
             }
-            job->lock.lock();
 #ifndef NDEBUG
-            if (job->GetState() == PageFetchJob::State::DONE && job->cursor_pageno + 1 != pageno &&
-                job->cursor_pageno) {
+            if (job->GetState() == PageFetchJob::State::DONE && job->cursor_pageno) {
                 ++prefetch_wasted_;
             }
 #endif
             job->Renew();
             job->pageno = pageno;
             job->dest = dest;
+            job->PutState(PageFetchJob::State::WIP);
+            foreground = true;
         }
-        std::unique_lock<std::mutex> job_lock(job->lock, std::adopt_lock);
-        // By acquiring the job lock, we've either waited for a background thread to finish the
-        // job, or prevented one from starting it.
 
-        if (job->GetState() == PageFetchJob::State::DONE) {
-#ifndef NDEBUG
-            ++prefetch_wins_;
-#endif
-        } else {
-            // Run the job immediately on this thread. This is an optimization vs. simply waiting
-            // for the background prefetch to finish in its turn. We can cut the line and read the
-            // page directly onto this processor die.
+        // If a background thread hasn't yet started the job, run it immediately here. Cut in line
+        // for the seek lock and read the page directly onto this processor die.
+        if (foreground) {
             seek_interrupt_.store(true, std::memory_order_relaxed);
             std::unique_lock<std::mutex> seek_lock(seek_lock_);
             seek_interrupt_.store(false, std::memory_order_relaxed);
             job->Execute(seek_lock);
+            assert(job->GetState() == PageFetchJob::State::DONE);
+        } else {
+            // Semi-busy-wait for job to finish
+            while (job->GetState() < PageFetchJob::State::DONE) {
+                std::this_thread::yield();
+            }
+#ifndef NDEBUG
+            ++prefetch_wins_;
+#endif
         }
-        job->last_op = ++read_opcount_;
 
         if (!job->errmsg.empty()) {
             _DBG << job->errmsg << _EOL;
@@ -411,47 +399,31 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             assert(!job->dest);
             memcpy(dest, job->decodebuf.data(), page_size_);
         }
+        job->last_op = ++read_opcount_;
         job->Renew();
 
         // if the cursor had previously read pageno-1, use it to initiate prefetch of pageno+1
-        if (job->was_sequential && pageno < page_count_) {
-            // always leave at least one slot free for a random read to use; if there isn't one
-            // now, try to expire the oldest DONE job.
-            if (fetch_jobs_.size() == max_fetch_jobs_) {
-                bool other_new = false;
-                PageFetchJob *oldest_done = nullptr;
-                for (auto job_i = fetch_jobs_.begin(); job_i != fetch_jobs_.end(); job_i++) {
-                    if (job_i->get() != job) {
-                        auto st = (*job_i)->GetState();
-                        if (st == PageFetchJob::State::NEW) {
-                            other_new = true;
-                            break;
-                        }
-                        if (st == PageFetchJob::State::DONE &&
-                            (!oldest_done || oldest_done->last_op > (*job_i)->last_op)) {
-                            oldest_done = job_i->get();
-                        }
+        if (job->was_sequential && max_fetch_jobs_ > 1 && pageno < page_count_) {
+            int active_jobs = 0;
+            for (auto job_i = fetch_jobs_.begin(); job_i != fetch_jobs_.end(); job_i++) {
+                if (job_i->get() != job) {
+                    auto st = (*job_i)->GetState();
+                    if (st == PageFetchJob::State::QUEUE || st == PageFetchJob::State::WIP) {
+                        ++active_jobs;
                     }
-                }
-                if (!other_new) {
-                    if (!oldest_done) {
-                        // we're out of prefetch slots, but cursor may still come in handy later
-                        return;
-                    }
-                    oldest_done->Renew();
-#ifndef NDEBUG
-                    ++prefetch_wasted_;
-#endif
                 }
             }
-
-            job->pageno = pageno + 1;
-            job->PutState(PageFetchJob::State::QUEUE);
-            job_lock.unlock();
-            // job_lock must be released prior to Enqueue!!! because BackgroundFetchJob only tries
-            // once to acquire it
-            fetch_thread_pool_.Enqueue(
-                job, [this](void *job) { return this->BackgroundFetchJob(job); }, nullptr);
+            // always leave at least one slot free for a foreground read to use
+            if (active_jobs + 2 <= max_fetch_jobs_) {
+                job->pageno = pageno + 1;
+                job->PutState(PageFetchJob::State::QUEUE);
+                fetch_thread_pool_.Enqueue(
+                    job, [this](void *job) { return this->BackgroundFetchJob(job); }, nullptr);
+            } else {
+                assert(active_jobs + 1 == max_fetch_jobs_);
+                // even if we don't have capacity for background-prefetch, the open cursor may yet
+                // benefit a subsequent read of pageno+1.
+            }
         }
     }
 
@@ -502,8 +474,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 int page_ofs = sofar == 0 ? iOfst % page_size_ : 0;
                 int desired = std::min(iAmt - sofar, (int)page_size_ - page_ofs);
                 if (pageno == 1 && page1plain_) {
-                    // optimized read of "plaintext" page 1, possibly including non-aligned reads
-                    // (SQLite reading just the header or version number)
+                    // optimized read of "plaintext" page 1, possibly including non-aligned
+                    // reads (SQLite reading just the header or version number)
                     ReadPlainPage1(zBuf, desired, page_ofs);
                 } else {
                     bool partial = page_ofs != 0 || desired != page_size_;
@@ -536,14 +508,36 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         }
     }
 
+    void PrefetchBarrier() {
+        // Abort prefetch jobs that haven't started yet
+        seek_interrupt_.store(true, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> seek_lock(seek_lock_);
+            seek_interrupt_.store(false, std::memory_order_relaxed);
+            for (auto &job : fetch_jobs_) {
+                if (job->TransitionState(PageFetchJob::State::QUEUE, PageFetchJob::State::NEW)) {
+                    job->Renew();
+                }
+            }
+        }
+        // Wait for WIP jobs to finish, then wipe everything
+        fetch_thread_pool_.Barrier();
+        for (auto &job : fetch_jobs_) {
+            assert(job->GetState() == PageFetchJob::State::NEW ||
+                   job->GetState() == PageFetchJob::State::DONE);
+            job->Renew();
+            job->ResetCursor();
+        }
+    }
+
     /**********************************************************************************************
      * Write() and helpers
      *********************************************************************************************/
 
     // On the first Write() we open a transaction with the outer db as a buffer for this and
-    // subsequent writes, which we commit upon Sync() or Close(). We never explicitly rollback this
-    // transaction, although rollback may occur if the process/host crashes. By Assumption 2 above,
-    // inner db should always recover to a consistent state.
+    // subsequent writes, which we commit upon Sync() or Close(). We never explicitly rollback
+    // this transaction, although rollback may occur if the process/host crashes. By Assumption
+    // 2 above, inner db should always recover to a consistent state.
     std::unique_ptr<SQLite::Transaction> txn_;
     std::unique_ptr<SQLite::Statement> insert_page_, update_page_, delete_pages_;
     void begin() {
@@ -639,7 +633,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         }
     }
 
-    // perform upsert operation in worker thread; ThreadPool runs these serially in enqueued order
+    // perform upsert operation in worker thread; ThreadPool runs these serially in enqueued
+    // order
     void ExecuteUpsert(EncodeJob *pjob) noexcept {
         std::unique_ptr<EncodeJob> job(pjob);
         try {
@@ -798,16 +793,16 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
     int Lock(int eLock) override {
         /*
-        No-op: currently we hardcode locking_mode=EXCLUSIVE for the outer db, so there's no need to
-        respond to inner db lock calls. This can be relaxed in the future by:
+        No-op: currently we hardcode locking_mode=EXCLUSIVE for the outer db, so there's no need
+        to respond to inner db lock calls. This can be relaxed in the future by:
           - when we get Lock(SQLITE_LOCK_SHARED): open some read cursor on the outer db
           - when we get Lock(SQLITE_LOCK_EXCLUSIVE): BEGIN EXCLUSIVE txn on outer db
           - when we get xUnlock(SQLITE_LOCK_SHARED): Sync() if needed (only if inner db has
             PRAGMA synchronous=OFF)
           - when we get xUnlock(SQLITE_LOCK_NONE): close the read cursor we'd opened
-        Holding the open cursor is supposed to ensure outer db lock only downgrades from EXCLUSIVE
-        to SHARED upon txn commit, rather than releasing entirely. Testing of all this will be
-        tricky, so we've punted on it for now.
+        Holding the open cursor is supposed to ensure outer db lock only downgrades from
+        EXCLUSIVE to SHARED upon txn commit, rather than releasing entirely. Testing of all this
+        will be tricky, so we've punted on it for now.
         */
         return SQLITE_OK;
     }
@@ -832,11 +827,10 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     int SectorSize() override { return 0; }
     int DeviceCharacteristics() override {
         return SQLITE_IOCAP_ATOMIC | SQLITE_IOCAP_POWERSAFE_OVERWRITE;
-        // We could optimize small write transactions by supporting SQLITE_IOCAP_BATCH_ATOMIC, but
-        // there would be some tricky details to get just right, e.g. rollback commanded through
-        // FileControl.
-        // We can easily support SQLITE_IOCAP_SEQUENTIAL and SQLITE_IOCAP_SAFE_APPEND, but these
-        // don't help the main database file, only journals.
+        // We could optimize small write transactions by supporting SQLITE_IOCAP_BATCH_ATOMIC,
+        // but there would be some tricky details to get just right, e.g. rollback commanded
+        // through FileControl. We can easily support SQLITE_IOCAP_SEQUENTIAL and
+        // SQLITE_IOCAP_SAFE_APPEND, but these don't help the main database file, only journals.
     }
 
     int Close() override {
@@ -912,8 +906,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         assert(threads);
         methods_.iVersion = 1;
         assert(outer_db_->execAndGet("PRAGMA quick_check").getString() == "ok");
-        max_fetch_jobs_ = std::min((int)threads, 4);
-        fetch_jobs_.reserve(max_fetch_jobs_); // important! ensure fetch_jobs_.data() never moves
+        max_fetch_jobs_ = std::min((int)threads, MAX_FETCH_CURSORS);
+        fetch_jobs_.reserve(MAX_FETCH_CURSORS); // important! ensure fetch_jobs_.data() never moves
     }
 }; // namespace SQLiteNested
 
@@ -937,7 +931,8 @@ class VFS : public SQLiteVFS::Wrapper {
         return db.tableExists(inner_db_tablename_prefix_ + "pages");
     }
 
-    // create page table; called within a transaction, subclasses may override and add aux tables
+    // create page table; called within a transaction, subclasses may override and add aux
+    // tables
     virtual void InitOuterDB(SQLite::Database &db) {
         SQLite::Statement check(db, "SELECT * FROM sqlite_master");
         if (check.executeStep()) {
@@ -989,7 +984,8 @@ class VFS : public SQLiteVFS::Wrapper {
                     std::unique_ptr<SQLite::Database> outer_db(new SQLite::Database(
                         outer_db_uri, flags | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI, 0,
                         outer_vfs_));
-                    // see comment in Lock() about possibe future relaxation of exclusive locking
+                    // see comment in Lock() about possibe future relaxation of exclusive
+                    // locking
                     outer_db->exec("PRAGMA locking_mode=EXCLUSIVE");
                     if (unsafe) {
                         outer_db->exec(UNSAFE_PRAGMAS);
@@ -1043,14 +1039,15 @@ class VFS : public SQLiteVFS::Wrapper {
             }
         }
         // Anything besides inner database file: let outer VFS handle it.
-        // Remove SQLITE_OPEN_MAIN_JOURNAL to prevent SQLite os_unix.c from trying to copy owner &
-        // perms of the inner database file, which doesn't exist from its POV. We assume os_unix.c
-        // doesn't do anything else special for SQLITE_OPEN_MAIN_JOURNAL that might be required for
-        // transaction safety! (The inner journal file is usually unused anyway.)
+        // Remove SQLITE_OPEN_MAIN_JOURNAL to prevent SQLite os_unix.c from trying to copy owner
+        // & perms of the inner database file, which doesn't exist from its POV. We assume
+        // os_unix.c doesn't do anything else special for SQLITE_OPEN_MAIN_JOURNAL that might be
+        // required for transaction safety! (The inner journal file is usually unused anyway.)
         // see: https://sqlite.org/src/file?name=src/os_unix.c&ci=tip
-        // Note it has an assert that flags has -some- eType set; so, in case the host SQLite has
-        // assertions on, we add SQLITE_OPEN_SUBJOURNAL when we remove SQLITE_OPEN_MAIN_JOURNAL.
-        // The same issue will affect SQLITE_OPEN_WAL if/when we try to suport WAL mode.
+        // Note it has an assert that flags has -some- eType set; so, in case the host SQLite
+        // has assertions on, we add SQLITE_OPEN_SUBJOURNAL when we remove
+        // SQLITE_OPEN_MAIN_JOURNAL. The same issue will affect SQLITE_OPEN_WAL if/when we try
+        // to suport WAL mode.
         if (flags & SQLITE_OPEN_MAIN_JOURNAL) {
             flags &= ~SQLITE_OPEN_MAIN_JOURNAL;
             flags |= SQLITE_OPEN_SUBJOURNAL;
@@ -1059,9 +1056,9 @@ class VFS : public SQLiteVFS::Wrapper {
         return wrapped_->xOpen(wrapped_, zName, pFile, flags, pOutFlags);
     }
 
-    // Given user-provided db filename, use it as the outer db on the host filesystem, and append
-    // a suffix as the inner db's filename (which won't actually exist on the host filesystem, but
-    // xOpen() will recognize).
+    // Given user-provided db filename, use it as the outer db on the host filesystem, and
+    // append a suffix as the inner db's filename (which won't actually exist on the host
+    // filesystem, but xOpen() will recognize).
     int FullPathname(const char *zName, int nPathOut, char *zPathOut) override {
         int rc = SQLiteVFS::Wrapper::FullPathname(zName, nPathOut, zPathOut);
         if (rc != SQLITE_OK) {
