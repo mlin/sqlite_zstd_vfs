@@ -416,7 +416,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         // if the cursor had previously read pageno-1, use it to initiate prefetch of pageno+1
         if (job->was_sequential && pageno < page_count_) {
             // always leave at least one slot free for a random read to use; if there isn't one
-            // now, try expire the oldest DONE job.
+            // now, try to expire the oldest DONE job.
             if (fetch_jobs_.size() == max_fetch_jobs_) {
                 bool other_new = false;
                 PageFetchJob *oldest_done = nullptr;
@@ -907,7 +907,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
           // MAX(pageno) instead of COUNT(pageno) because the latter would trigger table scan
           select_page_count_(*outer_db_,
                              "SELECT IFNULL(MAX(pageno), 0) FROM " + inner_db_pages_table_),
-          thread_pool_(threads, threads * 3), fetch_thread_pool_(threads, threads),
+          thread_pool_(threads, threads * 3), fetch_thread_pool_(threads, threads + 1),
           seek_interrupt_(false) {
         assert(threads);
         methods_.iVersion = 1;
