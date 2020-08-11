@@ -161,6 +161,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         SQLite::Statement cursor;        // outer db cursor
         sqlite3_int64 cursor_pageno = 0; // if >0 then cursor is currently on this page
         unsigned long long last_op = 0;  // "time" of the cursor's last use
+        bool was_sequential = false;
 
         const void *src = nullptr; // outer db page to be decoded
         int src_size = 0;
@@ -211,13 +212,21 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 #endif
             assert(pageno > 0);
             assert(errmsg.empty() && !src && !src_size);
+            bool ans = false;
             if (cursor_pageno != pageno) {
                 if (cursor_pageno + 1 == pageno && cursor_pageno) {
+                    was_sequential = true;
+#ifndef NDEBUG
                     sequential++;
+#endif
+                    ans = true;
                 } else {
                     ResetCursor();
                     cursor.bind(1, pageno);
+                    was_sequential = false;
+#ifndef NDEBUG
                     non_sequential++;
+#endif
                 }
                 if (!cursor.executeStep() || cursor.getColumn(0).getInt64() != pageno) {
                     throw SQLite::Exception("missing page " + std::to_string(pageno),
@@ -281,7 +290,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     std::mutex seek_lock_;
     std::atomic<bool> seek_interrupt_;
 
-    unsigned long long read_opcount_ = 0, prefetch_wins_ = 0;
+    unsigned long long read_opcount_ = 0, prefetch_wins_ = 0, prefetch_wasted_ = 0;
     sqlite3_int64 longest_read_ = 0;
 
     void *BackgroundFetchJob(void *ctx) {
@@ -398,35 +407,38 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         }
         job->Renew();
 
-        // TODO: more-conservative criterion
-        if (pageno < page_count_) {
-            // if other prefetch slots are full, try to expire an old DONE job
+        // if the cursor had previously read pageno-1, use it to initiate prefetch of pageno+1
+        if (job->was_sequential && pageno < page_count_) {
+            // always leave at least one slot free for a random read to use; if there isn't one
+            // now, try expire the oldest DONE job, otherwise call off the prefetch.
             if (fetch_jobs_.size() == max_fetch_jobs_) {
                 bool other_new = false;
+                PageFetchJob *oldest_done = nullptr;
                 for (auto job_i = fetch_jobs_.begin(); job_i != fetch_jobs_.end(); job_i++) {
-                    if (job_i->get() != job && (*job_i)->GetState() == PageFetchJob::State::NEW) {
-                        other_new = true;
-                        break;
-                    }
-                }
-                if (!other_new) {
-                    PageFetchJob *oldest_done = nullptr;
-                    for (auto job_i = fetch_jobs_.begin(); job_i != fetch_jobs_.end(); job_i++) {
-                        if (job_i->get() != job &&
-                            (*job_i)->GetState() == PageFetchJob::State::DONE &&
+                    if (job_i->get() != job) {
+                        auto st = (*job_i)->GetState();
+                        if (st == PageFetchJob::State::NEW) {
+                            other_new = true;
+                            break;
+                        }
+                        if (st == PageFetchJob::State::DONE &&
                             (!oldest_done || oldest_done->last_op > (*job_i)->last_op)) {
                             oldest_done = job_i->get();
                         }
                     }
+                }
+                if (!other_new) {
                     if (!oldest_done) {
-                        // out of prefetch slots, but job->cursor may still be useful later
+                        // we're out of prefetch slots, but cursor may still come in handy later
                         return;
                     }
                     oldest_done->Renew();
+#ifndef NDEBUG
+                    ++prefetch_wasted_;
+#endif
                 }
             }
 
-            // initiate prefetch of pageno+1 using the same cursor
             job->pageno = pageno + 1;
             job->PutState(PageFetchJob::State::QUEUE);
             job_lock.unlock();
@@ -847,7 +859,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         if (sequential + non_sequential) {
             _DBG << "reads sequential: " << sequential << " non-sequential: " << non_sequential
                  << " longest: " << longest_read_ << " prefetched: " << prefetch_wins_
-                 << " seek: " << t_seek.count() / 1000000
+                 << " wasted: " << prefetch_wasted_ << " seek: " << t_seek.count() / 1000000
                  << "ms decode: " << t_decode.count() / 1000000 << "ms" << _EOL;
         }
         return SQLiteVFS::File::Close();
