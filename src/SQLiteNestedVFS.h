@@ -270,7 +270,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         return std::unique_ptr<PageFetchJob>(new PageFetchJob(*this));
     }
 
-    int max_fetch_jobs_ = 4;
+    int max_fetch_jobs_;
     ThreadPool fetch_thread_pool_;
     std::vector<std::unique_ptr<PageFetchJob>> fetch_jobs_;
     std::mutex seek_lock_;
@@ -892,7 +892,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         assert(threads);
         methods_.iVersion = 1;
         assert(outer_db_->execAndGet("PRAGMA quick_check").getString() == "ok");
-        max_fetch_jobs_ = std::min((int)threads, max_fetch_jobs_);
+        max_fetch_jobs_ = std::min((int)threads, 4);
         fetch_jobs_.reserve(max_fetch_jobs_); // important! ensure fetch_jobs_.data() never moves
     }
 };

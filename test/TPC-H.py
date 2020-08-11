@@ -137,12 +137,12 @@ def run(cache_MiB, level, threads, inner_page_KiB, outer_page_KiB):
 
     # repeat queries on compressed db
     for query_name, query_sql in queries.items():
-        con = connect_zstd("/tmp/TPC-H.zstd.db", cache_MiB=cache_MiB)
+        con = connect_zstd("/tmp/TPC-H.zstd.db", cache_MiB=cache_MiB, threads=threads)
         results = list(con.execute(query_sql))
         con.close()
         assert results == expected_results[query_name]
 
-        con = connect_zstd("/tmp/TPC-H.zstd.db", cache_MiB=cache_MiB)
+        con = connect_zstd("/tmp/TPC-H.zstd.db", cache_MiB=cache_MiB, threads=threads)
         with timer(timings, "zstd_" + query_name):
             results = list(con.execute(query_sql))
         con.close()
@@ -151,11 +151,11 @@ def run(cache_MiB, level, threads, inner_page_KiB, outer_page_KiB):
     return timings
 
 
-def connect_zstd(dbfn, mode="ro", cache_MiB=None):
+def connect_zstd(dbfn, mode="ro", cache_MiB=None, threads=1):
     con = sqlite3.connect(f":memory:")
     con.enable_load_extension(True)
     con.load_extension(os.path.join(BUILD, "zstd_vfs"))
-    con = sqlite3.connect(f"file:{dbfn}?vfs=zstd&mode={mode}", uri=True)
+    con = sqlite3.connect(f"file:{dbfn}?vfs=zstd&mode={mode}&threads={threads}", uri=True)
     if cache_MiB:
         con.execute(f"PRAGMA cache_size={-1024*cache_MiB}")
     return con
