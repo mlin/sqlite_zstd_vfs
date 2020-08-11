@@ -132,32 +132,34 @@ class InnerDatabaseFile : public SQLiteVFS::File {
      * Read() and helpers
      *********************************************************************************************/
 
-    // Holds state for a background page fetch: reading it from the outer database and decoding it.
+    // Holds state for a background page fetch: reading it from the outer database and decoding it
+    // on a background thread, to hide decompression time while reading sequential pages.
     // Several tricky bits:
     // 1. Interactions with the outer database must be serialized, while decoding may parallelize.
-    // 2. After seeking to a page, keep the cursor open and later reuse it if asked for the next
-    //    sequential page.
-    // 3. The foreground thread can inspect the queued jobs and "promote" one it wants done ASAP.
+    // 2. After seeking to a page in the outer database, keep the cursor open so that it can be
+    //    reused if we're later asked for the next sequential page.
+    // 3. When the main thread wants a page that isn't being prefetched, let it cut in line.
+    // 4. When the main thread wants a page that's currently being prefetched, have it wait.
+    // 5. Little thread synchronization overhead is affordable, as Zstandard decompression of a
+    //    SQLite page (4-64 KiB) takes only 1-10 microseconds -- about 10x time to memcpy.
     // Subclasses may in turn subclass this to add their own logic to SeekCursor and DecodePage.
     struct PageFetchJob {
         std::mutex lock;
 
         enum State { NEW, QUEUE, DONE };
         State state = State::NEW;
-        sqlite3_int64 pageno = 0;
-        size_t page_size;
+        std::string errmsg; // nonempty = error
 
-        SQLite::Statement cursor;
+        sqlite3_int64 pageno = 0; // desired page
+        size_t page_size;
+        void *dest = nullptr;        // If non-null, decode page directly here (foreground fetch)
+        std::vector<char> decodebuf; // otherwise decode into this buffer (background fetch)
+
+        SQLite::Statement cursor;        // outer db cursor
         sqlite3_int64 cursor_pageno = 0; // if >0 then cursor is currently on this page
         unsigned long long last_op = 0;  // "time" of the cursor's last use
 
-        // If dest is non-null, decode the page directly there. Otherwise decode it into decodebuf.
-        // dest is set when the request is "urgent" i.e. the foreground thread is blocking on it.
-        void *dest = nullptr;
-        std::vector<char> decodebuf;
-        std::string errmsg;
-
-        const void *src = nullptr;
+        const void *src = nullptr; // outer db page to be decoded
         int src_size = 0;
 
         // counters
@@ -172,6 +174,10 @@ class InnerDatabaseFile : public SQLiteVFS::File {
               page_size(that.page_size_) {}
 
         virtual ~PageFetchJob() {}
+
+        void *EffectiveDest() {
+            return dest ? dest : (decodebuf.resize(page_size), decodebuf.data());
+        }
 
         // prepare job for reuse (keep cursor & decodebuf)
         virtual void Renew() {
@@ -192,49 +198,55 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             last_op = 0;
         }
 
-        // move cursor to pageno, by next() if possible, otherwise from scratch. runs on a
-        // background thread that serializes such operations.
+        // move cursor to pageno, by next() if possible, otherwise from scratch. these operations
+        // must be serialized, as they deal with the outer db.
         virtual void SeekCursor() {
+#ifndef NDEBUG
             auto t0 = std::chrono::high_resolution_clock::now();
+#endif
             assert(pageno > 0);
-            assert(errmsg.empty());
-            if (cursor_pageno == pageno) {
-                return;
+            assert(errmsg.empty() && !src && !src_size);
+            if (cursor_pageno != pageno) {
+                if (cursor_pageno + 1 == pageno && cursor_pageno) {
+                    sequential++;
+                } else {
+                    ResetCursor();
+                    cursor.bind(1, pageno);
+                    non_sequential++;
+                }
+                if (!cursor.executeStep() || cursor.getColumn(0).getInt64() != pageno) {
+                    throw SQLite::Exception("page missing", SQLITE_CORRUPT);
+                }
+                cursor_pageno = pageno;
             }
-            if (cursor_pageno + 1 == pageno && cursor_pageno) {
-                sequential++;
-            } else {
-                ResetCursor();
-                cursor.bind(1, pageno);
-                non_sequential++;
-            }
-            if (!cursor.executeStep() || cursor.getColumn(0).getInt64() != pageno) {
-                throw SQLite::Exception("page missing", SQLITE_CORRUPT);
-            }
-            cursor_pageno = pageno;
             SQLite::Column data = cursor.getColumn(1);
-            assert(data.isBlob() && data.getName() == std::string("data"));
+            assert(data.getName() == std::string("data"));
             src = data.getBlob();
             src_size = data.getBytes();
+            if (src_size && (!src || !data.isBlob())) {
+                throw SQLite::Exception("corrupt page " + std::to_string(pageno), SQLITE_CORRUPT);
+            }
+#ifndef NDEBUG
             t_seek += std::chrono::high_resolution_clock::now() - t0;
-        }
-
-        void *EffectiveDest() {
-            return dest ? dest : (decodebuf.resize(page_size), decodebuf.data());
+#endif
         }
 
         // Decode one page from the blob stored in the outer db. Override me!
-        // Runs on any background thread.
+        // May parallelize with other jobs.
         virtual void DecodePage() {
+#ifndef NDEBUG
             auto t0 = std::chrono::high_resolution_clock::now();
-            if (!src || src_size != page_size) {
+#endif
+            if (src_size != page_size) {
                 throw SQLite::Exception("page " + std::to_string(pageno) +
                                             " size = " + std::to_string(src_size) +
                                             " expected = " + std::to_string(page_size),
                                         SQLITE_CORRUPT);
             }
             memcpy(EffectiveDest(), src, src_size);
+#ifndef NDEBUG
             t_decode += std::chrono::high_resolution_clock::now() - t0;
+#endif
         }
     };
 
@@ -246,7 +258,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     int max_fetch_jobs_ = 4;
     std::vector<std::unique_ptr<PageFetchJob>> fetch_jobs_;
     std::mutex seek_lock_;
-    bool seek_interrupt_;
+    bool seek_interrupt_ = false;
 
     unsigned long long read_opcount_ = 0, prefetch_wins_ = 0;
     sqlite3_int64 longest_read_ = 0;
@@ -320,7 +332,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             }
         }
 
-        // If not, enqueue one; preferably using a pre-positioned cursor
+        // If not, create one; preferably using a pre-positioned cursor...
         if (!job) {
             for (auto job_i = fetch_jobs_.begin(); job_i != fetch_jobs_.end(); job_i++) {
                 if ((*job_i)->state == PageFetchJob::State::NEW) {
@@ -328,12 +340,14 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                         job = job_i->get();
                         break;
                     }
-                    if (!job || job->last_op > (*job_i)->last_op) {
+                    // ...or a cursor that isn't positioned, or lastly the LRU cursor
+                    if (!job || (*job_i)->cursor_pageno == 0 || job->last_op > (*job_i)->last_op) {
                         job = job_i->get();
                     }
                 }
             }
-            if (!job) {
+            if (!job || (fetch_jobs_.size() < max_fetch_jobs_ && job->cursor_pageno + 1 != pageno &&
+                         job->cursor_pageno)) {
                 assert(fetch_jobs_.size() < max_fetch_jobs_);
                 fetch_jobs_.push_back(NewPageFetchJob());
                 job = fetch_jobs_.back().get();
@@ -342,19 +356,20 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             assert(job->state == PageFetchJob::State::NEW);
             job->pageno = pageno;
             job->dest = dest;
-            job->state = PageFetchJob::State::QUEUE;
         }
         std::lock_guard<std::mutex> job_lock(job->lock, std::adopt_lock);
         // By acquiring the job lock, we've either waited for a background thread to finish the
         // job, or prevented one from starting it.
 
         if (job->state == PageFetchJob::State::DONE) {
+#ifndef NDEBUG
             ++prefetch_wins_;
+#endif
         } else {
             // Run the job immediately on this thread. This is an optimization vs. simply waiting
             // for the background prefetch to finish in its turn. We can cut the line and read the
             // page directly onto this processor die.
-            // TODO: does seek_interrupt_ need to be std:atomic for this to be visible?
+            // TODO: does seek_interrupt_ need to be std::atomic for this to be visible?
             seek_interrupt_ = true;
             std::unique_lock<std::mutex> seek_lock(seek_lock_);
             seek_interrupt_ = false;
@@ -367,7 +382,6 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 job->errmsg = exn.what();
                 job->cursor_pageno = 0;
             }
-            job->state = PageFetchJob::State::DONE;
         }
         job->last_op = ++read_opcount_;
 
@@ -378,6 +392,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         }
 
         if (job->dest != dest) {
+            // if data had been prefetched, copy it into place
             assert(!job->dest);
             memcpy(dest, job->decodebuf.data(), page_size_);
         }

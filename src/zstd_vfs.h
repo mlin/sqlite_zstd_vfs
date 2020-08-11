@@ -129,7 +129,9 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
         // need to load it from the outer db.
         void SeekCursor() override {
             super::PageFetchJob::SeekCursor();
+#ifndef NDEBUG
             auto t0 = std::chrono::high_resolution_clock::now();
+#endif
             ddict = nullptr;
             plain = false;
             auto meta1 = cursor.getColumn(2);
@@ -143,13 +145,17 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
                 throw SQLite::Exception("unexpected meta1 entry in zstd page table",
                                         SQLITE_CORRUPT);
             }
+#ifndef NDEBUG
             t_seek += std::chrono::high_resolution_clock::now() - t0;
+#endif
         }
 
         // Perform decompression using dctx & ddict
         void DecodePage() override {
             assert(src && src_size);
+#ifndef NDEBUG
             auto t0 = std::chrono::high_resolution_clock::now();
+#endif
             if (plain) { // uncompressed page
                 return super::PageFetchJob::DecodePage();
             }
@@ -169,7 +175,9 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             if (zrc != page_size) {
                 throw SQLite::Exception("zstd page decompression failed", SQLITE_CORRUPT);
             }
+#ifndef NDEBUG
             t_decode += std::chrono::high_resolution_clock::now() - t0;
+#endif
         }
     };
 
