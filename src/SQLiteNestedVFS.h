@@ -271,6 +271,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     }
 
     int max_fetch_jobs_ = 4;
+    ThreadPool fetch_thread_pool_;
     std::vector<std::unique_ptr<PageFetchJob>> fetch_jobs_;
     std::mutex seek_lock_;
     bool seek_interrupt_ = false;
@@ -430,7 +431,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             job_lock.unlock();
             // job_lock must be released prior to Enqueue!!! because BackgroundFetchJob only tries
             // once to acquire it
-            thread_pool_.Enqueue(
+            fetch_thread_pool_.Enqueue(
                 job, [this](void *job) { return this->BackgroundFetchJob(job); }, nullptr);
         }
     }
@@ -887,9 +888,11 @@ class InnerDatabaseFile : public SQLiteVFS::File {
           // MAX(pageno) instead of COUNT(pageno) because the latter would trigger table scan
           select_page_count_(*outer_db_,
                              "SELECT IFNULL(MAX(pageno), 0) FROM " + inner_db_pages_table_),
-          thread_pool_(threads, threads * 3) {
+          thread_pool_(threads, threads * 3), fetch_thread_pool_(threads, threads) {
+        assert(threads);
         methods_.iVersion = 1;
         assert(outer_db_->execAndGet("PRAGMA quick_check").getString() == "ok");
+        max_fetch_jobs_ = min((int)threads, max_fetch_jobs_);
         fetch_jobs_.reserve(max_fetch_jobs_); // important! ensure fetch_jobs_.data() never moves
     }
 };
