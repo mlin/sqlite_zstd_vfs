@@ -149,8 +149,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
         enum State { NEW, QUEUE, DONE };
         std::atomic<State> _state;
-        State GetState() const { return _state.load(std::memory_order_relaxed); }
-        void PutState(State st) { _state.store(st, std::memory_order_relaxed); }
+        State GetState() const { return _state.load(std::memory_order_acquire); }
+        void PutState(State st) { _state.store(st, std::memory_order_release); }
         std::string errmsg; // nonempty = error
 
         sqlite3_int64 pageno = 0; // desired page
@@ -371,6 +371,12 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 job = fetch_jobs_.back().get();
             }
             job->lock.lock();
+#ifndef NDEBUG
+            if (job->GetState() == PageFetchJob::State::DONE && job->cursor_pageno + 1 != pageno &&
+                job->cursor_pageno) {
+                ++prefetch_wasted_;
+            }
+#endif
             job->Renew();
             job->pageno = pageno;
             job->dest = dest;
@@ -410,7 +416,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         // if the cursor had previously read pageno-1, use it to initiate prefetch of pageno+1
         if (job->was_sequential && pageno < page_count_) {
             // always leave at least one slot free for a random read to use; if there isn't one
-            // now, try expire the oldest DONE job, otherwise call off the prefetch.
+            // now, try expire the oldest DONE job.
             if (fetch_jobs_.size() == max_fetch_jobs_) {
                 bool other_new = false;
                 PageFetchJob *oldest_done = nullptr;
