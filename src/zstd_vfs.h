@@ -288,6 +288,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
 
     struct CompressJob : super::EncodeJob {
         std::vector<char> buffer;
+        int level = -1;
         ZSTD_CCtx *cctx = nullptr;
         sqlite3_int64 dict_id = -1;
         const ZSTD_CDict *cdict = nullptr;
@@ -311,9 +312,9 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
                                                    page.size(), cdict);
                     meta1 = dict_id;
                 } else {
-                    // no dict yet (first 100 pages); use fast setting (level -1)
+                    // no dict yet (first 100 pages)
                     zrc = ZSTD_compressCCtx(cctx, buffer.data(), buffer.size(), page.data(),
-                                            page.size(), -1);
+                                            page.size(), level);
                     meta1 = -1;
                 }
                 if (!ZSTD_isError(zrc) && zrc * 10 < 8 * page.size()) {
@@ -351,6 +352,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             job.dict_id = -1;
             job.cdict = nullptr;
         }
+        job.level = compression_level_;
     }
 
   public:

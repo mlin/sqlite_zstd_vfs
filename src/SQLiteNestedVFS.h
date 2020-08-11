@@ -17,6 +17,7 @@
 #include "SQLiteCpp/SQLiteCpp.h"
 #include "SQLiteVFS.h"
 #include "ThreadPool.h"
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <libgen.h>
@@ -147,7 +148,9 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         std::mutex lock;
 
         enum State { NEW, QUEUE, DONE };
-        State state = State::NEW;
+        std::atomic<State> _state;
+        State GetState() const { return _state.load(std::memory_order_relaxed); }
+        void PutState(State st) { _state.store(st, std::memory_order_relaxed); }
         std::string errmsg; // nonempty = error
 
         sqlite3_int64 pageno = 0; // desired page
@@ -171,7 +174,9 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             : cursor(*(that.outer_db_), "SELECT pageno, data, meta1, meta2 FROM " +
                                             that.inner_db_pages_table_ +
                                             " WHERE pageno >= ? ORDER BY pageno"),
-              page_size(that.page_size_) {}
+              page_size(that.page_size_) {
+            PutState(State::NEW);
+        }
 
         virtual ~PageFetchJob() {}
 
@@ -181,7 +186,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
         // prepare job for reuse (keep cursor & decodebuf)
         virtual void Renew() {
-            state = State::NEW;
+            PutState(State::NEW);
             pageno = 0;
             dest = nullptr;
             src = nullptr;
@@ -261,7 +266,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 errmsg = exn.what();
                 cursor_pageno = 0;
             }
-            state = PageFetchJob::State::DONE;
+            PutState(State::DONE);
         }
     };
 
@@ -274,7 +279,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     ThreadPool fetch_thread_pool_;
     std::vector<std::unique_ptr<PageFetchJob>> fetch_jobs_;
     std::mutex seek_lock_;
-    bool seek_interrupt_ = false;
+    std::atomic<bool> seek_interrupt_;
 
     unsigned long long read_opcount_ = 0, prefetch_wins_ = 0;
     sqlite3_int64 longest_read_ = 0;
@@ -282,7 +287,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     void *BackgroundFetchJob(void *ctx) {
         PageFetchJob *job = (PageFetchJob *)ctx;
         std::unique_lock<std::mutex> seek_lock(seek_lock_);
-        while (seek_interrupt_) {
+        while (seek_interrupt_.load(std::memory_order_relaxed)) {
             // give way to main thread trying to take seek_lock
             seek_lock.unlock();
             std::this_thread::yield();
@@ -292,7 +297,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             return nullptr; // they took our job!!!!!
         }
         std::lock_guard<std::mutex> job_lock(job->lock, std::adopt_lock);
-        if (job->state != PageFetchJob::State::QUEUE) {
+        if (job->GetState() != PageFetchJob::State::QUEUE) {
             return nullptr; // they did our job!!!!!
         }
         job->Execute(seek_lock);
@@ -301,9 +306,9 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
     void PrefetchBarrier() {
         // Abort prefetch jobs that haven't started yet
-        seek_interrupt_ = true;
+        seek_interrupt_.store(true, std::memory_order_relaxed);
         std::lock_guard<std::mutex> seek_lock(seek_lock_);
-        seek_interrupt_ = false;
+        seek_interrupt_.store(false, std::memory_order_relaxed);
         for (auto &job : fetch_jobs_) {
             if (job->lock.try_lock()) {
                 job->Renew();
@@ -331,7 +336,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             if ((*job_i)->pageno == pageno) {
                 job = job_i->get();
                 job->lock.lock();
-                assert((*job_i)->state != PageFetchJob::State::NEW);
+                assert((*job_i)->GetState() != PageFetchJob::State::NEW);
                 break;
             }
         }
@@ -339,7 +344,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         // If not, create one; preferably using a pre-positioned cursor...
         if (!job) {
             for (auto job_i = fetch_jobs_.begin(); job_i != fetch_jobs_.end(); job_i++) {
-                if ((*job_i)->state != PageFetchJob::State::QUEUE) {
+                if ((*job_i)->GetState() != PageFetchJob::State::QUEUE) {
                     if ((*job_i)->cursor_pageno + 1 == pageno) {
                         job = job_i->get();
                         break;
@@ -365,7 +370,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         // By acquiring the job lock, we've either waited for a background thread to finish the
         // job, or prevented one from starting it.
 
-        if (job->state == PageFetchJob::State::DONE) {
+        if (job->GetState() == PageFetchJob::State::DONE) {
 #ifndef NDEBUG
             ++prefetch_wins_;
 #endif
@@ -373,10 +378,9 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             // Run the job immediately on this thread. This is an optimization vs. simply waiting
             // for the background prefetch to finish in its turn. We can cut the line and read the
             // page directly onto this processor die.
-            // TODO: does seek_interrupt_ need to be std::atomic for this to be visible?
-            seek_interrupt_ = true;
+            seek_interrupt_.store(true, std::memory_order_relaxed);
             std::unique_lock<std::mutex> seek_lock(seek_lock_);
-            seek_interrupt_ = false;
+            seek_interrupt_.store(false, std::memory_order_relaxed);
             job->Execute(seek_lock);
         }
         job->last_op = ++read_opcount_;
@@ -400,7 +404,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             if (fetch_jobs_.size() == max_fetch_jobs_) {
                 bool other_new = false;
                 for (auto job_i = fetch_jobs_.begin(); job_i != fetch_jobs_.end(); job_i++) {
-                    if (job_i->get() != job && (*job_i)->state == PageFetchJob::State::NEW) {
+                    if (job_i->get() != job && (*job_i)->GetState() == PageFetchJob::State::NEW) {
                         other_new = true;
                         break;
                     }
@@ -408,13 +412,10 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 if (!other_new) {
                     PageFetchJob *oldest_done = nullptr;
                     for (auto job_i = fetch_jobs_.begin(); job_i != fetch_jobs_.end(); job_i++) {
-                        if (job_i->get() != job && (*job_i)->lock.try_lock()) {
-                            if ((*job_i)->state == PageFetchJob::State::DONE &&
-                                (!oldest_done || oldest_done->last_op > (*job_i)->last_op)) {
-                                oldest_done = job_i->get();
-                            }
-                            // we acquired job_i's lock just to ensure receipt of its current state
-                            (*job_i)->lock.unlock();
+                        if (job_i->get() != job &&
+                            (*job_i)->GetState() == PageFetchJob::State::DONE &&
+                            (!oldest_done || oldest_done->last_op > (*job_i)->last_op)) {
+                            oldest_done = job_i->get();
                         }
                     }
                     if (!oldest_done) {
@@ -427,7 +428,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
             // initiate prefetch of pageno+1 using the same cursor
             job->pageno = pageno + 1;
-            job->state = PageFetchJob::State::QUEUE;
+            job->PutState(PageFetchJob::State::QUEUE);
             job_lock.unlock();
             // job_lock must be released prior to Enqueue!!! because BackgroundFetchJob only tries
             // once to acquire it
@@ -888,14 +889,15 @@ class InnerDatabaseFile : public SQLiteVFS::File {
           // MAX(pageno) instead of COUNT(pageno) because the latter would trigger table scan
           select_page_count_(*outer_db_,
                              "SELECT IFNULL(MAX(pageno), 0) FROM " + inner_db_pages_table_),
-          thread_pool_(threads, threads * 3), fetch_thread_pool_(threads, threads) {
+          thread_pool_(threads, threads * 3), fetch_thread_pool_(threads, threads),
+          seek_interrupt_(false) {
         assert(threads);
         methods_.iVersion = 1;
         assert(outer_db_->execAndGet("PRAGMA quick_check").getString() == "ok");
         max_fetch_jobs_ = std::min((int)threads, 4);
         fetch_jobs_.reserve(max_fetch_jobs_); // important! ensure fetch_jobs_.data() never moves
     }
-};
+}; // namespace SQLiteNested
 
 // issue when write performance is prioritized over transaction safety / possible corruption
 const char *UNSAFE_PRAGMAS =
