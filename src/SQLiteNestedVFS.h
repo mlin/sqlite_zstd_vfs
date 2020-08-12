@@ -316,7 +316,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     }
 
     // Read page #pageno into dest, if possible by using a previously-scheduled prefetch.
-    void Read1Page(void *dest, sqlite3_int64 pageno) {
+    void Read1Page(void *dest, sqlite3_int64 pageno, sqlite3_int64 pageno_hint = 0) {
         if (read_opcount_ == ULLONG_MAX) { // pedantic
             PrefetchBarrier();
             read_opcount_ = 0;
@@ -402,7 +402,13 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         job->Renew();
 
         // if the cursor had previously read pageno-1, use it to initiate prefetch of pageno+1
-        if (job->was_sequential && fetch_thread_pool_.MaxThreads() > 1 && pageno < page_count_) {
+        if ((job->was_sequential || pageno_hint > 0) && fetch_thread_pool_.MaxThreads() > 1 &&
+            pageno < page_count_) {
+            if (pageno_hint == 0) {
+                pageno_hint = pageno + 1;
+            }
+            assert(pageno_hint >= 0 && pageno_hint <= page_count_);
+
             int active_jobs = 0;
             for (auto job_i = fetch_jobs_.begin(); job_i != fetch_jobs_.end(); job_i++) {
                 if (job_i->get() != job) {
@@ -414,7 +420,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             }
             // always leave at least one slot free for a non-sequential read to use
             if (active_jobs + 2 <= fetch_thread_pool_.MaxThreads()) {
-                job->pageno = pageno + 1;
+                job->pageno = pageno_hint;
                 job->PutState(PageFetchJob::State::QUEUE);
                 fetch_thread_pool_.Enqueue(
                     job, [this](void *job) { return this->BackgroundFetchJob(job); }, nullptr);
