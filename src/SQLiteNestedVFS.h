@@ -422,7 +422,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             } else {
                 assert(active_jobs + 1 == max_fetch_jobs_);
                 // even if we don't have capacity for background-prefetch, the open cursor may yet
-                // benefit a subsequent read of pageno+1.
+                // expedite a subsequent read of pageno+1.
             }
         }
     }
@@ -987,6 +987,7 @@ class VFS : public SQLiteVFS::Wrapper {
                     // see comment in Lock() about possibe future relaxation of exclusive
                     // locking
                     outer_db->exec("PRAGMA locking_mode=EXCLUSIVE");
+                    outer_db->exec("PRAGMA max_page_count=2147483646");
                     if (unsafe) {
                         outer_db->exec(UNSAFE_PRAGMAS);
                     }
