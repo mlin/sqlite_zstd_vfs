@@ -480,6 +480,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             // calculate page number range
             sqlite3_int64 first_page = 1 + iOfst / page_size_,
                           last_page = first_page + (iAmt - 1) / page_size_;
+            last_page = std::min(last_page, (sqlite3_int64)DetectPageCount());
             int sofar = 0;
             std::vector<char> pagebuf;
 
