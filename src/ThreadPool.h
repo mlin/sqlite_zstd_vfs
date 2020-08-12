@@ -75,8 +75,8 @@ class ThreadPool {
                     lock.lock();
                 }
                 ++seqno_done_;
-                cv_done_.notify_all();
             }
+            cv_done_.notify_all();
         }
     }
 
@@ -94,9 +94,18 @@ class ThreadPool {
         }
     }
 
+    size_t MaxThreads() const noexcept { return max_threads_; }
+
+    size_t MaxJobs() const noexcept { return max_jobs_; }
+
     // Enqueue ser(par(x)) for background processing as described. The functions must not throw.
     void Enqueue(void *x, std::function<void *(void *) noexcept> par,
                  std::function<void(void *) noexcept> ser) {
+        if (seqno_next_ == ULLONG_MAX) { // pedantic
+            Barrier();
+            seqno_next_ = 0;
+        }
+
         Job job;
         job.x = x;
         job.par = par;
@@ -108,6 +117,7 @@ class ThreadPool {
         }
         job.seqno = seqno_next_++;
         par_queue_.push(job);
+        lock.unlock();
         cv_enqueue_.notify_one();
         if (threads_.size() < max_threads_ && threads_.size() < par_queue_.size()) {
             threads_.emplace_back([this]() { this->Worker(); });

@@ -226,7 +226,8 @@ TEST_CASE("cellular_automata") {
                       "PRIMARY KEY(rule,pos));"
                       "CREATE INDEX dummy_index ON cellular_automata(state)";
         control.exec(schema);
-        experiment.exec("PRAGMA journal_mode=MEMORY; PRAGMA auto_vacuum=FULL");
+        experiment.exec(
+            "PRAGMA journal_mode=MEMORY; PRAGMA auto_vacuum=FULL; PRAGMA cache_size=-64");
         experiment.exec(schema);
 
         auto insert = "INSERT INTO cellular_automata(state,rule,pos) VALUES(?,?,?)",

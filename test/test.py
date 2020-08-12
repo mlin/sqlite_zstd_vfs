@@ -155,8 +155,8 @@ def test_vacuum(tmpdir, chinook_file):
 def test_sam(tmpdir):
     (region, expected_posflag) = ("chr21:20000000-25000000", 27074190881221)
     # (region, expected_posflag) = ("chr21:20000000-40000000", 148853599470365)
-    page_size = 16384
-    outer_page_size = 32768
+    page_size = 65536
+    outer_page_size = 1024
     level = 8
     subprocess.run(
         f"samtools view -O BAM -@ 4 -o {region}.bam https://s3.amazonaws.com/1000genomes/1000G_2504_high_coverage/data/ERR3239334/NA12878.final.cram {region}",
@@ -262,13 +262,13 @@ def test_tpch(tmpdir):
             "--cache-MiB",
             "100",
             "--inner-page-KiB",
-            "8",
+            "64",
             "--outer-page-KiB",
-            "16",
+            "2",
             "--level",
             "6",
             "--threads",
-            "-1",
+            str(max(multiprocessing.cpu_count(), 2)),
         ],
         check=True,
         stdout=subprocess.PIPE,
