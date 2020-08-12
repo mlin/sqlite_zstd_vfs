@@ -94,6 +94,10 @@ class ThreadPool {
         }
     }
 
+    size_t MaxThreads() const noexcept { return max_threads_; }
+
+    size_t MaxJobs() const noexcept { return max_jobs_; }
+
     // Enqueue ser(par(x)) for background processing as described. The functions must not throw.
     void Enqueue(void *x, std::function<void *(void *) noexcept> par,
                  std::function<void(void *) noexcept> ser) {
