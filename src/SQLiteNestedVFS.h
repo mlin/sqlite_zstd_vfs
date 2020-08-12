@@ -404,10 +404,10 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         // if the cursor had previously read pageno-1, use it to initiate prefetch of pageno+1
         if ((job->was_sequential || pageno_hint > 0) && fetch_thread_pool_.MaxThreads() > 1 &&
             pageno < page_count_) {
-            if (pageno_hint == 0) {
+            if (!pageno_hint) {
                 pageno_hint = pageno + 1;
             }
-            assert(pageno_hint >= 0 && pageno_hint <= page_count_);
+            assert(pageno_hint > 0 && pageno_hint <= page_count_);
 
             int active_jobs = 0;
             for (auto job_i = fetch_jobs_.begin(); job_i != fetch_jobs_.end(); job_i++) {
