@@ -117,14 +117,15 @@ Some parameters are controlled from the file URI's query string opening the data
 |   | URI query parameters | PRAGMA |
 | -- | -- | -- |
 | writing/compression | <ul><li>level</li><li>threads</li><li>outer_page_size</li><li>outer_unsafe</li></ul> | <ul><li>page_size</li><li>auto_vacuum</li><li>journal_mode</li></ul> |
-| reading/decompression | <ul><li>outer_cache_size</li></ul> | <ul><li>cache_size</li></ul> |
+| reading/decompression | <ul><li>outer_cache_size</li><li>noprefetch</li></ul> | <ul><li>cache_size</li></ul> |
 
 * **&level=3**: Zstandard compression level for newly written pages (-7 to 22)
-* **&threads=1**: background compression threads (-1 to match host processors)
+* **&threads=1**: thread budget for page compression & prefetching (-1 to match host processors)
 * **&outer_page_size=4096**: page size for the newly-created outer database; suggest doubling the (inner) page_size, to reduce space overhead from packing the compressed inner pages
 * **&outer_unsafe=false**: set true to speed up bulk load by disabling transaction safety for outer database (app crash easily causes corruption)
 
 * **&outer_cache_size=-2000**: page cache size for outer database, in [PRAGMA cache_size](https://www.sqlite.org/pragma.html#pragma_cache_size) units. Limited effect if on SSD.
+* **&noprefetch=false**: set true to disable background prefetching/decompression even if threads>1. Prefetching is counterproductive if page size is too small or CPU cycles are scarce.
 
 * **PRAGMA page_size=4096**: uncompressed [page size](https://www.sqlite.org/pragma.html#pragma_page_size) for the newly-created inner database. Larger pages are more compressible, but increase [read/write amplification](http://smalldatum.blogspot.com/2015/11/read-write-space-amplification-pick-2_23.html). YMMV but 8 or 16 KiB have been working well for us.
 * **PRAGMA auto_vacuum=NONE**: set to FULL or INCREMENTAL on a newly-created database if you expect its size to fluctuate over time, so that the file will [shrink to fit](https://www.sqlite.org/pragma.html#pragma_auto_vacuum). (The outer database auto-vacuums when it's closed.)

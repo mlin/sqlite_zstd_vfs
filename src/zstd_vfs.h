@@ -110,15 +110,15 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
         return dict_cache_[dict_id];
     }
 
-    struct ZstdPageFetchJob : public super::PageFetchJob {
+    struct ZstdFetchJob : public super::FetchJob {
         ZSTD_DCtx *dctx = nullptr;
         const ZSTD_DDict *ddict = nullptr;
         bool plain = false; // uncompressed page
         ZstdInnerDatabaseFile *that;
 
-        ZstdPageFetchJob(ZstdInnerDatabaseFile &that_) : super::PageFetchJob(that_), that(&that_) {}
+        ZstdFetchJob(ZstdInnerDatabaseFile &that_) : super::FetchJob(that_), that(&that_) {}
 
-        ~ZstdPageFetchJob() {
+        ~ZstdFetchJob() {
             if (dctx) {
                 ZSTD_freeDCtx(dctx);
             }
@@ -128,7 +128,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
         // dictionary ready for use. This has to be done in this serialized method since it may
         // need to load it from the outer db.
         void SeekCursor() override {
-            super::PageFetchJob::SeekCursor();
+            super::FetchJob::SeekCursor();
 #ifndef NDEBUG
             auto t0 = std::chrono::high_resolution_clock::now();
 #endif
@@ -157,7 +157,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             auto t0 = std::chrono::high_resolution_clock::now();
 #endif
             if (plain) { // uncompressed page
-                return super::PageFetchJob::DecodePage();
+                return super::FetchJob::DecodePage();
             }
             if (!dctx) {
                 dctx = ZSTD_createDCtx();
@@ -181,8 +181,8 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
         }
     };
 
-    std::unique_ptr<super::PageFetchJob> NewPageFetchJob() override {
-        return std::unique_ptr<super::PageFetchJob>(new ZstdPageFetchJob(*this));
+    std::unique_ptr<super::FetchJob> NewFetchJob() override {
+        return std::unique_ptr<super::FetchJob>(new ZstdFetchJob(*this));
     }
 
     // dict currently used for compression of new pages
@@ -214,7 +214,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
 
         if (cur_dict_ < 0) {
             PrefetchBarrier();
-            FinishUpserts();
+            UpsertBarrier();
             // start off with the newest dict stored in the database, if any
             if (!last_dict_id_) {
                 last_dict_id_.reset(
@@ -235,7 +235,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             std::max(page_count_, cur_dict_pages_written_) >= 3 * cur_dict_page_count_) {
             // time to create a new dict...
             PrefetchBarrier();
-            FinishUpserts();
+            UpsertBarrier();
             auto t0 = std::chrono::high_resolution_clock::now();
 
             // read random pages
