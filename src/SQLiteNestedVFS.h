@@ -96,11 +96,11 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     virtual size_t DetectPageSize() {
         if (!page_size_ && DetectPageCount()) {
             assert(page1plain_);
-            SQLite::Statement stmt(*outer_db_, "SELECT length(data) FROM " + inner_db_pages_table_ +
-                                                   " WHERE pageno = 1");
             sqlite3_int64 sz = -1;
-            if (stmt.executeStep()) {
-                sz = stmt.getColumn(0).getInt64();
+            auto rslt = outer_db_->execAndGet("SELECT length(data) FROM " + inner_db_pages_table_ +
+                                              " WHERE pageno = 1");
+            if (rslt.isInteger()) {
+                sz = rslt.getInt64();
             }
             if (sz <= 0 || sz > 65536) {
                 throw SQLite::Exception("invalid page size in nested VFS page table",
@@ -217,14 +217,12 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 #endif
             assert(pageno > 0);
             assert(errmsg.empty() && !src && !src_size);
-            bool ans = false;
             if (cursor_pageno != pageno) {
                 if (cursor_pageno + 1 == pageno && cursor_pageno) {
                     was_sequential = true;
 #ifndef NDEBUG
                     sequential++;
 #endif
-                    ans = true;
                 } else {
                     ResetCursor();
                     cursor.bind(1, pageno);

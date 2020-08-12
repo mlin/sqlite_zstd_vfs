@@ -264,7 +264,7 @@ def test_tpch(tmpdir):
             "--inner-page-KiB",
             "64",
             "--outer-page-KiB",
-            "1",
+            "2",
             "--level",
             "6",
             "--threads",
