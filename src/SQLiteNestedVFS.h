@@ -376,9 +376,12 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             // dest. This elides a memcpy, often one from another processor die
             job->dest = dest;
             if (can_prefetch) {
-                seek_interrupt_.store(true, std::memory_order_relaxed);
-                std::unique_lock<std::mutex> seek_lock(seek_lock_);
-                seek_interrupt_.store(false, std::memory_order_relaxed);
+                std::unique_lock<std::mutex> seek_lock(seek_lock_, std::defer_lock);
+                if (!seek_lock.try_lock()) {
+                    seek_interrupt_.store(true, std::memory_order_relaxed);
+                    seek_lock.lock();
+                    seek_interrupt_.store(false, std::memory_order_relaxed);
+                }
                 job->Execute(&seek_lock);
             } else {
                 job->Execute();
@@ -522,17 +525,18 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     void PrefetchBarrier() {
         if (fetch_thread_pool_.MaxThreads() > 1) {
             // Abort prefetch jobs that haven't started yet
-            seek_interrupt_.store(true, std::memory_order_relaxed);
-            {
-                std::lock_guard<std::mutex> seek_lock(seek_lock_);
+            std::unique_lock<std::mutex> seek_lock(seek_lock_, std::defer_lock);
+            if (!seek_lock.try_lock()) {
+                seek_interrupt_.store(true, std::memory_order_relaxed);
+                seek_lock.lock();
                 seek_interrupt_.store(false, std::memory_order_relaxed);
-                for (auto &job : fetch_jobs_) {
-                    if (job->TransitionState(PageFetchJob::State::QUEUE,
-                                             PageFetchJob::State::NEW)) {
-                        job->Renew();
-                    }
+            }
+            for (auto &job : fetch_jobs_) {
+                if (job->TransitionState(PageFetchJob::State::QUEUE, PageFetchJob::State::NEW)) {
+                    job->Renew();
                 }
             }
+            seek_lock.unlock();
             // Wait for WIP jobs
             fetch_thread_pool_.Barrier();
         }
