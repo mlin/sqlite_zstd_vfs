@@ -151,7 +151,9 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         // may all race (with an atomic CAS) to start the job. The winner later performs the
         // WIP=>DONE transition. Other transitions are only performed by the main thread.
         std::atomic<State> _state;
-        inline State GetState() const noexcept { return _state.load(std::memory_order_acquire); }
+        inline State GetState(std::memory_order ord = std::memory_order_acquire) const noexcept {
+            return _state.load(ord);
+        }
         inline void PutState(State st) noexcept { _state.store(st, std::memory_order_release); }
         inline bool TransitionState(State expected, State desired) noexcept {
             return _state.compare_exchange_strong(expected, desired, std::memory_order_acq_rel);
@@ -192,12 +194,12 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
         // prepare job for reuse (keep cursor & decodebuf)
         virtual void Renew() {
-            PutState(State::NEW);
             pageno = 0;
             dest = nullptr;
             src = nullptr;
             src_size = 0;
             errmsg.clear();
+            PutState(State::NEW);
         }
 
         // reset the outer database cursor; should be done when it otherwise might go stale.
@@ -347,8 +349,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                         job = job_i->get();
                         break;
                     }
-                    // ...or a cursor that isn't positioned anywhere useful, or lastly the LRU
-                    if (!job || (*job_i)->cursor_pageno == 0 || job->last_op > (*job_i)->last_op) {
+                    // ...otherwise the one least-recently used, or unused since last reset
+                    if (!job || (*job_i)->last_op < job->last_op) {
                         job = job_i->get();
                     }
                 }
@@ -371,7 +373,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         }
 
         if (foreground) {
-            // We've got the ball-- cut in line for the seek lock and decode the page directly into
+            // We've got the ball; cut in line for the seek lock and decode the page directly into
             // dest. This elides a memcpy, often one from another processor die
             job->dest = dest;
             if (can_prefetch) {
@@ -388,8 +390,18 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             assert(job->GetState() == FetchJob::State::DONE);
         } else {
             // Semi-busy-wait for background job to finish
-            while (job->GetState() < FetchJob::State::DONE) {
-                std::this_thread::yield();
+            // https://rigtorp.se/spinlock/
+            while (true) {
+                if (job->GetState() == FetchJob::State::DONE) {
+                    break;
+                }
+                while (job->GetState(std::memory_order_relaxed) != FetchJob::State::DONE) {
+#ifdef __x86_64__
+                    __builtin_ia32_pause();
+#else
+                    std::this_thread::yield();
+#endif
+                }
             }
 #ifndef NDEBUG
             ++prefetch_wins_;
