@@ -45,9 +45,6 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
     std::unique_ptr<SQLite::Statement> get_dict_, last_dict_id_, dict_pages_, put_dict_;
     using SQLiteNested::InnerDatabaseFile::StatementResetter;
 
-    // zstd de/compression contexts
-    std::shared_ptr<ZSTD_DCtx> dctx_;
-
     // in-memory cache of dict buffers and zstd de/compression dict structures, lazily populated
     struct dict_cache_entry {
         std::string dict;
