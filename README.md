@@ -1,6 +1,6 @@
 # sqlite_zstd_vfs
 
-This [SQLite VFS extension](https://www.sqlite.org/vfs.html) provides streaming storage compression with [Zstandard](https://facebook.github.io/zstd/), compressing [pages of the main database file](https://www.sqlite.org/fileformat.html) as they're written out, and later decompressing them as they're read in. It runs page compression on background threads and occasionally generates [dictionaries](https://github.com/facebook/zstd#the-case-for-small-data-compression) to improve subsequent compression.
+This [SQLite VFS extension](https://www.sqlite.org/vfs.html) provides streaming storage compression with [Zstandard](https://facebook.github.io/zstd/), compressing [pages of the main database file](https://www.sqlite.org/fileformat.html) as they're written out, and later decompressing them as they're read in. It runs page de/compression on background threads and occasionally generates [dictionaries](https://github.com/facebook/zstd#the-case-for-small-data-compression) to improve subsequent compression.
 
 Compressed page storage operates similarly to the [design of ZIPVFS](https://sqlite.org/zipvfs/doc/trunk/www/howitworks.wiki), the SQLite developers' proprietary extension. Because we're not as familiar with the internal "pager" module, we use a full-fledged SQLite database as the bottom-most layer. Where SQLite would write database page #P at offset P × page_size in the disk file, instead we `INSERT INTO outer_page_table(rowid,data) VALUES(P,compressed_inner_page)`, and later `SELECT data FROM outer_page_table WHERE rowid=P`. *You mustn't be afraid to dream a little smaller, darling...*
 
@@ -95,20 +95,23 @@ Repeat the query to see the update.
 
 ## Performance
 
-Here are some operation timings using a [1,195MiB TPC-H database](https://github.com/lovasoa/TPCH-sqlite) on my laptop. This isn't a thorough benchmark, just a rough indication that many applications should find the decompression overhead acceptable for the storage saved. (Credit to Zstandard!)
+Here are some operation timings using a [1,195MiB TPC-H database](https://github.com/lovasoa/TPCH-sqlite) on a Google N2 VM. This isn't a thorough benchmark, just a rough indication that many applications should find the de/compression overhead well worth the storage saved.
 
 |    | db file size | bulk load<sup>1</sup> | Query 1 | Query 8 |
 | -- | --: | --: | --: | --: |
-| SQLite defaults | 1182MiB | 4.3s | 8.4s | 3.9s |
-| zstd_vfs defaults | 647MiB | 21.1s | 11.5s | 44.7s |
-| zstd_vfs tuned<sup>2</sup> | 500MiB | 14.9s | 10.6s | 7.1s |
+| SQLite defaults | 1182MiB | 2.4s | 6.7s | 3.0s |
+| zstd_vfs defaults | 647MiB | 25.0s | 8.8s | 35.7s |
+| zstd_vfs tuned<sup>2</sup> | 433MiB | 33.7s | 7.8s | 4.5s |
+| zstd_vfs tuned &threads=8 | 433MiB | 6.9s | 6.7s | 3.1s |
 
 <sup>1</sup> by VACUUM INTO<br/>
-<sup>2</sup> `&level=6&threads=8&outer_page_size=16384&outer_unsafe=true`; [`PRAGMA page_size=8192`](https://www.sqlite.org/pragma.html#pragma_page_size); [`PRAGMA cache_size=-102400`](https://www.sqlite.org/pragma.html#pragma_cache_size)
+<sup>2</sup> `&level=6&outer_page_size=2048&outer_unsafe=true`; [`PRAGMA page_size=65536`](https://www.sqlite.org/pragma.html#pragma_page_size); [`PRAGMA cache_size=-102400`](https://www.sqlite.org/pragma.html#pragma_cache_size)
 
-Query 1 is an aggregation satisfied by one table scan. Decompression slows it down by ~25% while the database file shrinks by 50-60%. (Each query starts with a hot filesystem cache and cold database page cache.)
+Query 1 is an aggregation satisfied by one table scan. Foreground Zstandard decompression slows it down by ~25% while the database file shrinks by 45-65%. (Each query starts with a hot filesystem cache and cold database page cache.)
 
 Query 8 is an [historically influential](https://www.sqlite.org/queryplanner-ng.html) eight-way join. SQLite's default ~2MB page cache is too small for its access pattern, leading to a disastrous slowdown from repeated page decompression; but simply increasing the page cache to 100MiB largely solves this problem. Evidently, we should prefer a much larger page cache in view of the increased cost to miss.
+
+Background threads can be used for both compression and "prefetching" during sequential scans. This greatly improves bulk load speed, and can sometimes fully hide decompression latency (given sequential access patterns, large pages, and spare CPU availability).
 
 ## Tuning
 
@@ -125,7 +128,7 @@ Some parameters are controlled from the file URI's query string opening the data
 * **&outer_unsafe=false**: set true to speed up bulk load by disabling transaction safety for outer database (app crash easily causes corruption)
 
 * **&outer_cache_size=-2000**: page cache size for outer database, in [PRAGMA cache_size](https://www.sqlite.org/pragma.html#pragma_cache_size) units. Limited effect if on SSD.
-* **&noprefetch=false**: set true to disable background prefetching/decompression even if threads>1. Prefetching is counterproductive if page size is too small or CPU cycles are scarce.
+* **&noprefetch=false**: set true to disable background prefetching/decompression even if threads>1. Prefetching is counterproductive if page_size is too small or CPU cycles are scarce.
 
 * **PRAGMA page_size=4096**: uncompressed [page size](https://www.sqlite.org/pragma.html#pragma_page_size) for the newly-created inner database. Larger pages are more compressible, but increase [read/write amplification](http://smalldatum.blogspot.com/2015/11/read-write-space-amplification-pick-2_23.html). YMMV but 8 or 16 KiB have been working well for us.
 * **PRAGMA auto_vacuum=NONE**: set to FULL or INCREMENTAL on a newly-created database if you expect its size to fluctuate over time, so that the file will [shrink to fit](https://www.sqlite.org/pragma.html#pragma_auto_vacuum). (The outer database auto-vacuums when it's closed.)
