@@ -64,19 +64,24 @@ class ThreadPool {
             ser_queue_.push(job);
             // run the enqueued serial stage(s) so long as the next one is in seqno order.
             // this may or may not include the one just enqueued.
-            while (!ser_queue_.empty() && ser_queue_.top().seqno == seqno_done_) {
+            auto seqno0 = seqno_done_;
+            for (; !ser_queue_.empty() && ser_queue_.top().seqno == seqno_done_; ++seqno_done_) {
                 job = ser_queue_.top();
                 ser_queue_.pop();
                 if (job.ser) {
                     // run the next serial stage; we can release lock for this because the seqno
                     // check ensures only one can be dequeued at a time.
                     lock.unlock();
+                    if (seqno_done_ > seqno0) {
+                        cv_done_.notify_all();
+                    }
                     job.ser(job.x);
                     lock.lock();
                 }
-                ++seqno_done_;
             }
-            cv_done_.notify_all();
+            if (seqno_done_ > seqno0) {
+                cv_done_.notify_all();
+            }
         }
     }
 
