@@ -115,7 +115,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         // integrity check: page indices are sequential [1..page_count_]
         sqlite3_int64 pagenosum =
             outer_db_->execAndGet("SELECT SUM(pageno) FROM " + inner_db_pages_table_).getInt64();
-        return pagenosum == page_count_ * (page_count_ + 1) / 2;
+        return pagenosum == page_count_ * (page_count_ + 1) / 2 ||
+               (page1plain_ && pagenosum == page_count_ * (page_count_ + 1) / 2 - 100);
     }
 
     int FileSize(sqlite3_int64 *pSize) override {
@@ -453,24 +454,29 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         }
     }
 
-    void ReadPlainPage1(void *zBuf, int iAmt, int iOfst) {
-        assert(page1plain_ && iOfst + iAmt <= page_size_);
-        sqlite3_blob *pBlob = nullptr;
-        int rc = sqlite3_blob_open(outer_db_->getHandle(), "main", inner_db_pages_table_.c_str(),
-                                   "data", 1, 0, &pBlob);
-        if (rc != SQLITE_OK) {
-            throw SQLite::Exception("couldn't open page 1 blob", rc);
+    std::unique_ptr<SQLite::Statement> read_header_;
+    bool ReadPlainPage1(void *zBuf, int iAmt, int iOfst) {
+        // Optimization for frequent reads of database header fields (within the first 100 bytes of
+        // page 1). To avoid frequent reading/copying of the up-to-64KiB page, we keep an
+        // up-to-date copy of its first 100 bytes in a special row of the pages table with
+        // pageno = -100. Then we can fetch it with less overhead here. This applies only if page 1
+        // is stored "plaintext" (page1plain_ which may be set false by a subclass). The special
+        // row is kept up-to-date in ExecuteUpsert, below.
+        if (!page1plain_ || iOfst + iAmt > 100)
+            return false;
+        PrefetchBarrier();
+        if (!read_header_) {
+            read_header_.reset(new SQLite::Statement(
+                *outer_db_, "SELECT data FROM " + inner_db_pages_table_ + " WHERE pageno = -100"));
         }
-        assert(sqlite3_blob_bytes(pBlob) == page_size_);
-        rc = sqlite3_blob_read(pBlob, zBuf, iAmt, iOfst);
-        if (rc != SQLITE_OK) {
-            sqlite3_blob_close(pBlob);
-            throw SQLite::Exception("couldn't read page 1 blob", rc);
-        }
-        rc = sqlite3_blob_close(pBlob);
-        if (rc != SQLITE_OK) {
-            throw SQLite::Exception("couldn't close page 1 blob", rc);
-        }
+        StatementResetter resetter(*read_header_);
+        if (!read_header_->executeStep())
+            return false;
+        SQLite::Column data = read_header_->getColumn(0);
+        if (!data.isBlob() || iOfst + iAmt > data.getBytes())
+            return false;
+        memcpy(zBuf, ((char *)data.getBlob()) + iOfst, iAmt);
+        return true;
     }
 
     int Read(void *zBuf, int iAmt, sqlite3_int64 iOfst) override {
@@ -500,11 +506,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             for (sqlite3_int64 pageno = first_page; pageno <= last_page; ++pageno) {
                 int page_ofs = sofar == 0 ? iOfst % page_size_ : 0;
                 int desired = std::min(iAmt - sofar, (int)page_size_ - page_ofs);
-                if (pageno == 1 && page1plain_) {
-                    // optimized read of "plaintext" page 1, possibly including non-aligned
-                    // reads (SQLite reading just the header or version number)
-                    ReadPlainPage1(zBuf, desired, page_ofs);
-                } else {
+                if (pageno != 1 || !ReadPlainPage1(zBuf, desired, page_ofs)) {
                     bool partial = page_ofs != 0 || desired != page_size_;
                     void *dest = (char *)zBuf + sofar;
                     Read1Page((partial ? (pagebuf.resize(page_size_), pagebuf.data()) : dest),
@@ -690,6 +692,20 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             StatementResetter resetter(*upsert);
             if (upsert->exec() != 1) {
                 throw std::runtime_error("unexpected result from page upsert");
+            }
+
+            if (page1plain_ && job->pageno == 1) {
+                // see ReadPlainPage1() above. When we write page 1, cc its first 100 bytes into a
+                // special row with pageno = -100.
+                upsert->reset();
+                upsert->bindNoCopy(1, job->encoded_page,
+                                   std::min(job->encoded_page_size, size_t(100)));
+                upsert->bind(2, job->meta1);
+                upsert->bind(3, job->meta2);
+                upsert->bind(4, (sqlite_int64)-100);
+                if (upsert->exec() != 1) {
+                    throw std::runtime_error("unexpected result from header upsert");
+                }
             }
 
             {
