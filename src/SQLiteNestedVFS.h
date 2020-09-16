@@ -453,26 +453,6 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         }
     }
 
-    void ReadPlainPage1(void *zBuf, int iAmt, int iOfst) {
-        assert(page1plain_ && iOfst + iAmt <= page_size_);
-        sqlite3_blob *pBlob = nullptr;
-        int rc = sqlite3_blob_open(outer_db_->getHandle(), "main", inner_db_pages_table_.c_str(),
-                                   "data", 1, 0, &pBlob);
-        if (rc != SQLITE_OK) {
-            throw SQLite::Exception("couldn't open page 1 blob", rc);
-        }
-        assert(sqlite3_blob_bytes(pBlob) == page_size_);
-        rc = sqlite3_blob_read(pBlob, zBuf, iAmt, iOfst);
-        if (rc != SQLITE_OK) {
-            sqlite3_blob_close(pBlob);
-            throw SQLite::Exception("couldn't read page 1 blob", rc);
-        }
-        rc = sqlite3_blob_close(pBlob);
-        if (rc != SQLITE_OK) {
-            throw SQLite::Exception("couldn't close page 1 blob", rc);
-        }
-    }
-
     int Read(void *zBuf, int iAmt, sqlite3_int64 iOfst) override {
         try {
             assert(iAmt >= 0);
@@ -500,18 +480,11 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             for (sqlite3_int64 pageno = first_page; pageno <= last_page; ++pageno) {
                 int page_ofs = sofar == 0 ? iOfst % page_size_ : 0;
                 int desired = std::min(iAmt - sofar, (int)page_size_ - page_ofs);
-                if (pageno == 1 && page1plain_) {
-                    // optimized read of "plaintext" page 1, possibly including non-aligned
-                    // reads (SQLite reading just the header or version number)
-                    ReadPlainPage1(zBuf, desired, page_ofs);
-                } else {
-                    bool partial = page_ofs != 0 || desired != page_size_;
-                    void *dest = (char *)zBuf + sofar;
-                    Read1Page((partial ? (pagebuf.resize(page_size_), pagebuf.data()) : dest),
-                              pageno);
-                    if (partial) {
-                        memcpy(dest, pagebuf.data() + page_ofs, desired);
-                    }
+                bool partial = page_ofs != 0 || desired != page_size_;
+                void *dest = (char *)zBuf + sofar;
+                Read1Page((partial ? (pagebuf.resize(page_size_), pagebuf.data()) : dest), pageno);
+                if (partial) {
+                    memcpy(dest, pagebuf.data() + page_ofs, desired);
                 }
                 sofar += desired;
                 assert(sofar <= iAmt);
