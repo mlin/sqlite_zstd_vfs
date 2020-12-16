@@ -20,7 +20,7 @@ set(SQLITE_ENABLE_COLUMN_METADATA OFF CACHE INTERNAL "")
 FetchContent_Declare(
     sqlitecpp
     GIT_REPOSITORY  https://github.com/SRombauts/SQLiteCpp.git
-    GIT_TAG         3.0.0
+    GIT_TAG         3.1.1
 )
 FetchContent_MakeAvailable(sqlitecpp)
 include_directories(${sqlitecpp_SOURCE_DIR}/include)

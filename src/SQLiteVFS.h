@@ -6,9 +6,13 @@
 
 #include <assert.h>
 #include <memory>
-#include <sqlite3.h>
 #include <string.h>
 #include <string>
+
+/*
+Omitted so that includer can choose whether to use sqlite3.h or sqlite3ext.h
+#include <sqlite3.h>
+*/
 
 namespace SQLiteVFS {
 

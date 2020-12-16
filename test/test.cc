@@ -1,10 +1,11 @@
 #define CATCH_CONFIG_MAIN
-#include "../src/SQLiteNestedVFS.h"
 #include "SQLiteCpp/SQLiteCpp.h"
 #include "catch2/catch.hpp"
 #include "sqlite3.h"
 #include <iostream>
 #include <vector>
+
+#include "../src/SQLiteNestedVFS.h"
 
 using namespace std;
 
