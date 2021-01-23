@@ -25,7 +25,8 @@ jobs:
         /usr/local/bin/pip3 install pytest pytest-xdist
     - name: build
       run: |
-        CXXFLAGS=-I$(brew --prefix)/include LDFLAGS=-L$(brew --prefix)/lib \
+        CXXFLAGS="-I$(brew --prefix)/include -I$(brew --prefix)/opt/sqlite/include" \
+        LDFLAGS="-L$(brew --prefix)/lib -L$(brew --prefix)/opt/sqlite/lib" \
           cmake -DCMAKE_BUILD_TYPE=${{ matrix.BUILD_TYPE }} \
                 -DCMAKE_PREFIX_PATH=$(brew --prefix)/opt/sqlite \
                 -B build .

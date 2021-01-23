@@ -23,6 +23,7 @@
 #include <libgen.h>
 #include <memory>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include <iostream>
@@ -1116,8 +1117,17 @@ class VFS : public SQLiteVFS::Wrapper {
     // append a suffix as the inner db's filename (which won't actually exist on the host
     // filesystem, but xOpen() will recognize).
     int FullPathname(const char *zName, int nPathOut, char *zPathOut) override {
-        int rc = SQLiteVFS::Wrapper::FullPathname(zName, nPathOut, zPathOut);
-        if (rc != SQLITE_OK) {
+        std::string zName2(zName);
+        if (!zName2.empty() && zName2[0] != '/') {
+            if (getcwd(zPathOut, nPathOut) && !strcmp(zPathOut, "/")) {
+                // evading bug in sqlite3 os_unix.c unixFullPathname, when given a relative path
+                // and the cwd is / (this tends to happen in docker)
+                zName2 = "/" + zName2;
+            }
+        }
+        int rc = SQLiteVFS::Wrapper::FullPathname(zName2.c_str(), nPathOut, zPathOut);
+        if (rc != SQLITE_OK && rc != SQLITE_OK_SYMLINK) {
+            _DBG << "FullPathNameE " << rc << " " << sqlite3_errstr(rc) << _EOL;
             return rc;
         }
         std::string outer_db_filename(zPathOut);

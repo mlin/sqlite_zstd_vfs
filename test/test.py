@@ -130,6 +130,26 @@ def test_roundtrip_zstd(tmpdir, chinook_file):
     actual = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
     assert actual == expected
 
+    # test reopen through symlink
+    linkpath = os.path.join(tmpdir, "symlink")
+    os.symlink(dbfn, linkpath)
+    assert os.path.realpath(linkpath) == os.path.realpath(dbfn)
+    linkcon = sqlite3.connect(f"file:{linkpath}?vfs=zstd", uri=True)
+    linkcon.execute("select 1")
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="must run in docker")
+def test_db_in_root():
+    # regression test, create db with relative path to root directory
+    # (this tends to happen in docker)
+    con = sqlite3.connect(f":memory:")
+    con.enable_load_extension(True)
+    con.load_extension(os.path.join(BUILD, "zstd_vfs"))
+    os.chdir("/")
+    con = sqlite3.connect(f"file:test_in_root.db?vfs=zstd", uri=True)
+    con.executescript("CREATE TABLE hello(x INTEGER)")
+    con.commit()
+
 
 def test_vacuum(tmpdir, chinook_file):
     # open the zstd database
