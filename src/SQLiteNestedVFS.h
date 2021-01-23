@@ -35,6 +35,35 @@
 #endif
 
 namespace SQLiteNested {
+// from https://rigtorp.se/spinlock/
+struct spinlock {
+    std::atomic<bool> lock_ = {0};
+
+    void lock() noexcept {
+        for (;;) {
+            // Optimistically assume the lock is free on the first try
+            if (!lock_.exchange(true, std::memory_order_acquire)) {
+                return;
+            }
+            // Wait for lock to be released without generating cache misses
+            while (lock_.load(std::memory_order_relaxed)) {
+                // Issue X86 PAUSE or ARM YIELD instruction to reduce contention between
+                // hyper-threads
+                __builtin_ia32_pause();
+            }
+        }
+    }
+
+    bool try_lock() noexcept {
+        // First do a relaxed load to check if lock is free in order to prevent
+        // unnecessary cache misses if someone does while(!try_lock())
+        return !lock_.load(std::memory_order_relaxed) &&
+               !lock_.exchange(true, std::memory_order_acquire);
+    }
+
+    void unlock() noexcept { lock_.store(false, std::memory_order_release); }
+};
+
 // Implements I/O methods for the "inner" main database file.
 // KEY ASSUMPTIONS:
 //   1. SQLite only calls the VFS xWrite() with one or more whole pages, and its first xWrite() to
@@ -271,7 +300,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 #endif
         }
 
-        virtual void Execute(std::unique_lock<std::mutex> *seek_lock = nullptr) noexcept {
+        virtual void Execute(std::unique_lock<spinlock> *seek_lock = nullptr) noexcept {
             assert(GetState() == State::WIP);
             assert(!seek_lock || seek_lock->owns_lock());
             try {
@@ -297,7 +326,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     const size_t MAX_FETCH_CURSORS = 4;
     std::vector<std::unique_ptr<FetchJob>> fetch_jobs_;
     ThreadPool fetch_thread_pool_;
-    std::mutex seek_lock_; // serializes outer db interactions among fetch background threads
+    spinlock seek_lock_; // serializes outer db interactions among fetch background threads
     std::atomic<bool> seek_interrupt_; // broadcast that main thread wants seek_lock_
 
     unsigned long long read_opcount_ = 0, prefetch_wins_ = 0, prefetch_wasted_ = 0;
@@ -305,7 +334,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
     void *BackgroundFetchJob(void *ctx) noexcept {
         FetchJob *job = (FetchJob *)ctx;
-        std::unique_lock<std::mutex> seek_lock(seek_lock_);
+        std::unique_lock<spinlock> seek_lock(seek_lock_);
         while (seek_interrupt_.load(std::memory_order_relaxed)) {
             // yield to main thread
             seek_lock.unlock();
@@ -379,7 +408,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             // dest. This elides a memcpy, often one from another processor die
             job->dest = dest;
             if (can_prefetch) {
-                std::unique_lock<std::mutex> seek_lock(seek_lock_, std::defer_lock);
+                std::unique_lock<spinlock> seek_lock(seek_lock_, std::defer_lock);
                 if (!seek_lock.try_lock()) {
                     seek_interrupt_.store(true, std::memory_order_relaxed);
                     seek_lock.lock();
@@ -398,11 +427,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                     break;
                 }
                 while (job->GetState(std::memory_order_relaxed) != FetchJob::State::DONE) {
-#ifdef __x86_64__
                     __builtin_ia32_pause();
-#else
-                    std::this_thread::yield();
-#endif
                 }
             }
 #ifndef NDEBUG
@@ -541,7 +566,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     void PrefetchBarrier() {
         if (fetch_thread_pool_.MaxThreads() > 1) {
             // Abort prefetch jobs that haven't started yet
-            std::unique_lock<std::mutex> seek_lock(seek_lock_, std::defer_lock);
+            std::unique_lock<spinlock> seek_lock(seek_lock_, std::defer_lock);
             if (!seek_lock.try_lock()) {
                 seek_interrupt_.store(true, std::memory_order_relaxed);
                 seek_lock.lock();
