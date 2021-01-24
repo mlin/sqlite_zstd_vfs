@@ -296,7 +296,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
     const size_t MAX_FETCH_CURSORS = 4;
     std::vector<std::unique_ptr<FetchJob>> fetch_jobs_;
-    ThreadPool fetch_thread_pool_;
+    ThreadPoolWithEnqueueFast fetch_thread_pool_;
     std::mutex seek_lock_; // serializes outer db interactions among fetch background threads
     std::atomic<bool> seek_interrupt_; // broadcast that main thread wants seek_lock_
 
@@ -445,7 +445,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             if (active_jobs + 2 <= fetch_thread_pool_.MaxThreads()) {
                 job->pageno = pageno_hint;
                 job->PutState(FetchJob::State::QUEUE);
-                fetch_thread_pool_.Enqueue(
+                fetch_thread_pool_.EnqueueFast(
                     job, [this](void *job) { return this->BackgroundFetchJob(job); }, nullptr);
             } else {
                 assert(active_jobs + 1 == fetch_thread_pool_.MaxThreads());

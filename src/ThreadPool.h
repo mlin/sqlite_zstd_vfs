@@ -13,6 +13,7 @@
 #include <functional>
 #include <mutex>
 #include <queue>
+#include <readerwriterqueue.h>
 #include <thread>
 
 namespace SQLiteNested {
@@ -88,7 +89,7 @@ class ThreadPool {
   public:
     ThreadPool(size_t max_threads, size_t max_jobs)
         : max_threads_(max_threads), max_jobs_(max_jobs), ser_queue_(job_greater_) {}
-    ~ThreadPool() {
+    virtual ~ThreadPool() {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             shutdown_ = true;
@@ -136,6 +137,60 @@ class ThreadPool {
             while (seqno_done_ < seqno_next_) {
                 cv_done_.wait(lock);
             }
+        }
+    }
+};
+
+// Adds lock-free EnqueueFast() for use on critical paths.
+// - EnqueueFast() never blocks (!)
+// - Only one thread should ever use it
+class ThreadPoolWithEnqueueFast : public ThreadPool {
+    // concept: foreground thread adds job onto a lock-free queue, which a single background thread
+    // consumes to Enqueue()
+
+    struct EnqueueFastJob {
+        bool shutdown = false;
+        void *x = nullptr;
+        std::function<void *(void *) noexcept> par;
+        std::function<void(void *) noexcept> ser;
+    };
+
+    moodycamel::BlockingReaderWriterQueue<EnqueueFastJob> fast_queue_;
+    std::unique_ptr<std::thread> worker_thread_;
+
+    void EnqueueFastWorker() {
+        EnqueueFastJob job;
+        while (true) {
+            fast_queue_.wait_dequeue(job);
+            if (job.shutdown) {
+                break;
+            }
+            this->Enqueue(job.x, job.par, job.ser);
+        }
+    }
+
+  public:
+    ThreadPoolWithEnqueueFast(size_t max_threads, size_t max_jobs)
+        : ThreadPool(max_threads, max_jobs), fast_queue_(max_jobs) {}
+
+    ~ThreadPoolWithEnqueueFast() {
+        if (worker_thread_) {
+            EnqueueFastJob job;
+            job.shutdown = true;
+            fast_queue_.enqueue(job);
+            worker_thread_->join();
+        }
+    }
+
+    void EnqueueFast(void *x, std::function<void *(void *) noexcept> par,
+                     std::function<void(void *) noexcept> ser) {
+        EnqueueFastJob job;
+        job.x = x;
+        job.par = par;
+        job.ser = ser;
+        fast_queue_.enqueue(job);
+        if (!worker_thread_) {
+            worker_thread_.reset(new std::thread([this]() { this->EnqueueFastWorker(); }));
         }
     }
 };

@@ -14,7 +14,7 @@ RUN apt-get -qq update && \
 ADD . /work
 WORKDIR /work
 
-RUN cmake -DCMAKE_BUILD_TYPE=$build_type . -B build && cmake --build build -j $(nproc)
+RUN rm -rf build && cmake -DCMAKE_BUILD_TYPE=$build_type . -B build && cmake --build build -j $(nproc)
 
 WORKDIR /work/build
 CMD ctest -V

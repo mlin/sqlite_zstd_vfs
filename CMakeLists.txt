@@ -25,6 +25,14 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(sqlitecpp)
 include_directories(${sqlitecpp_SOURCE_DIR}/include)
 
+FetchContent_Declare(
+    concurrentqueue
+    GIT_REPOSITORY  https://github.com/cameron314/readerwriterqueue.git
+    GIT_TAG         v1.0.3
+)
+FetchContent_MakeAvailable(concurrentqueue)
+include_directories(${concurrentqueue_SOURCE_DIR})
+
 project(sqlite_nested_vfs VERSION 1.0
         DESCRIPTION "SQLite VFS extension storing database pages in...a SQLite database"
         LANGUAGES C CXX)
