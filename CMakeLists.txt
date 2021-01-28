@@ -26,12 +26,14 @@ FetchContent_MakeAvailable(sqlitecpp)
 include_directories(${sqlitecpp_SOURCE_DIR}/include)
 
 FetchContent_Declare(
-    concurrentqueue
-    GIT_REPOSITORY  https://github.com/cameron314/readerwriterqueue.git
-    GIT_TAG         v1.0.3
+    sqlite_web_vfs
+    GIT_REPOSITORY  https://github.com/mlin/sqlite_web_vfs.git
+    GIT_TAG         576bc09
 )
+FetchContent_MakeAvailable(sqlite_web_vfs)
 FetchContent_MakeAvailable(concurrentqueue)
 include_directories(${concurrentqueue_SOURCE_DIR})
+include_directories(${sqlite_web_vfs_SOURCE_DIR}/src)
 
 project(sqlite_nested_vfs VERSION 1.0
         DESCRIPTION "SQLite VFS extension storing database pages in...a SQLite database"
@@ -41,11 +43,11 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(nested_vfs SHARED src/nested_vfs.cc src/SQLiteNestedVFS.h src/SQLiteVFS.h src/ThreadPool.h)
+add_library(nested_vfs SHARED src/nested_vfs.cc src/SQLiteNestedVFS.h)
 SET_TARGET_PROPERTIES(nested_vfs PROPERTIES PREFIX "")
 target_link_libraries(nested_vfs PRIVATE SQLiteCpp)
 
-add_library(zstd_vfs SHARED src/zstd_vfs.cc src/SQLiteNestedVFS.h src/SQLiteVFS.h src/zstd_vfs.h src/ThreadPool.h)
+add_library(zstd_vfs SHARED src/zstd_vfs.cc src/SQLiteNestedVFS.h src/zstd_vfs.h)
 SET_TARGET_PROPERTIES(zstd_vfs PROPERTIES PREFIX "")
 target_link_libraries(zstd_vfs PRIVATE SQLiteCpp zstd)
 
@@ -58,7 +60,7 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     FetchContent_MakeAvailable(catch)
     include_directories(${catch_SOURCE_DIR}/single_include)
 
-    add_executable(test_exe test/test.cc test/test_vfstrace.c src/SQLiteNestedVFS.h src/SQLiteVFS.h src/ThreadPool.h)
+    add_executable(test_exe test/test.cc test/test_vfstrace.c src/SQLiteNestedVFS.h)
     target_link_libraries(test_exe PRIVATE SQLiteCpp)
 
     include(CTest)
