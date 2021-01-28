@@ -970,6 +970,26 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 const char *UNSAFE_PRAGMAS =
     "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA locking_mode=EXCLUSIVE";
 
+// originally found: http://codepad.org/lCypTglt
+std::string urlencode(const std::string &s) {
+    // RFC 3986 section 2.3 Unreserved Characters (January 2005)
+    static const std::string unreserved =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~";
+
+    std::string escaped = "";
+    for (size_t i = 0; i < s.length(); i++) {
+        if (unreserved.find_first_of(s[i]) != std::string::npos) {
+            escaped.push_back(s[i]);
+        } else {
+            escaped.append("%");
+            char buf[3];
+            sprintf(buf, "%.2X", s[i]);
+            escaped.append(buf);
+        }
+    }
+    return escaped;
+}
+
 class VFS : public SQLiteVFS::Wrapper {
   protected:
     // subclass may override inner_db_tablename_prefix_ with something encoding-specific, to
@@ -1014,21 +1034,31 @@ class VFS : public SQLiteVFS::Wrapper {
             std::string sName(zName);
             if (flags & SQLITE_OPEN_MAIN_DB) {
                 // strip inner_db_filename_suffix_ to get filename of outer database
-                std::string outer_db_filename =
-                    sName.size() > inner_db_filename_suffix_.size()
-                        ? sName.substr(0, sName.size() - inner_db_filename_suffix_.size())
-                        : "";
-                if (outer_db_filename.empty() ||
-                    sName.substr(outer_db_filename.size()) != inner_db_filename_suffix_) {
-                    last_error_ = "inner database filename unexpectedly missing suffix " +
-                                  inner_db_filename_suffix_;
-                    return SQLITE_CANTOPEN_FULLPATH;
+                std::string outer_db_filename = sName;
+                if (sName != "/__web__") {
+                    if (sName.size() > inner_db_filename_suffix_.size()) {
+                        outer_db_filename =
+                            sName.substr(0, sName.size() - inner_db_filename_suffix_.size());
+                    } else {
+                        outer_db_filename.clear();
+                    }
+                    if (outer_db_filename.empty() ||
+                        sName.substr(outer_db_filename.size()) != inner_db_filename_suffix_) {
+                        last_error_ = "inner database filename unexpectedly missing suffix " +
+                                      inner_db_filename_suffix_;
+                        return SQLITE_CANTOPEN_FULLPATH;
+                    }
                 }
 
-                // TODO: URI-encode outer_db_filename
-                std::string outer_db_uri = "file:" + outer_db_filename;
+                std::string vfs = outer_vfs_;
+                std::string outer_db_uri = "file:" + urlencode(outer_db_filename);
                 bool unsafe = sqlite3_uri_boolean(zName, "outer_unsafe", 0);
-                if (unsafe) {
+                if (sName == "/__web__") {
+                    outer_db_uri += "?immutable=1&web_url=";
+                    outer_db_uri += urlencode(sqlite3_uri_parameter(zName, "web_url"));
+                    flags |= SQLITE_OPEN_READONLY;
+                    vfs = "web";
+                } else if (unsafe) {
                     outer_db_uri += "?nolock=1&psow=1";
                 } else if (sqlite3_uri_boolean(zName, "immutable", 0)) {
                     outer_db_uri += "?immutable=1";
@@ -1037,8 +1067,7 @@ class VFS : public SQLiteVFS::Wrapper {
                 try {
                     // open outer database
                     std::unique_ptr<SQLite::Database> outer_db(new SQLite::Database(
-                        outer_db_uri, flags | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI, 0,
-                        outer_vfs_));
+                        outer_db_uri, flags | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI, 0, vfs));
                     // see comment in Lock() about possibe future relaxation of exclusive
                     // locking
                     outer_db->exec("PRAGMA locking_mode=EXCLUSIVE");
@@ -1118,6 +1147,10 @@ class VFS : public SQLiteVFS::Wrapper {
     // filesystem, but xOpen() will recognize).
     int FullPathname(const char *zName, int nPathOut, char *zPathOut) override {
         std::string zName2(zName);
+        if (zName2 == "/__web__") {
+            strncpy(zPathOut, zName, nPathOut);
+            return SQLITE_OK;
+        }
         if (!zName2.empty() && zName2[0] != '/') {
             if (getcwd(zPathOut, nPathOut) && !strcmp(zPathOut, "/")) {
                 // evading bug in sqlite3 os_unix.c unixFullPathname, when given a relative path
@@ -1127,7 +1160,7 @@ class VFS : public SQLiteVFS::Wrapper {
         }
         int rc = SQLiteVFS::Wrapper::FullPathname(zName2.c_str(), nPathOut, zPathOut);
         if (rc != SQLITE_OK && rc != SQLITE_OK_SYMLINK) {
-            _DBG << "FullPathNameE " << rc << " " << sqlite3_errstr(rc) << _EOL;
+            _DBG << "FullPathName " << rc << " " << sqlite3_errstr(rc) << _EOL;
             return rc;
         }
         std::string outer_db_filename(zPathOut);

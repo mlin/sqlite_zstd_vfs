@@ -34,6 +34,7 @@ FetchContent_MakeAvailable(sqlite_web_vfs)
 FetchContent_MakeAvailable(concurrentqueue)
 include_directories(${concurrentqueue_SOURCE_DIR})
 include_directories(${sqlite_web_vfs_SOURCE_DIR}/src)
+add_definitions(-DHTTP_LAZYCURL)
 
 project(sqlite_nested_vfs VERSION 1.0
         DESCRIPTION "SQLite VFS extension storing database pages in...a SQLite database"
