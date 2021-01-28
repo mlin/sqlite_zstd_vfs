@@ -971,14 +971,14 @@ const char *UNSAFE_PRAGMAS =
     "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA locking_mode=EXCLUSIVE";
 
 // originally found: http://codepad.org/lCypTglt
-std::string urlencode(const std::string &s) {
+std::string urlencode(const std::string &s, bool keep_slash = false) {
     // RFC 3986 section 2.3 Unreserved Characters (January 2005)
     static const std::string unreserved =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~";
 
     std::string escaped = "";
     for (size_t i = 0; i < s.length(); i++) {
-        if (unreserved.find_first_of(s[i]) != std::string::npos) {
+        if (unreserved.find_first_of(s[i]) != std::string::npos || keep_slash && s[i] == '/') {
             escaped.push_back(s[i]);
         } else {
             escaped.append("%");
@@ -1051,11 +1051,12 @@ class VFS : public SQLiteVFS::Wrapper {
                 }
 
                 std::string vfs = outer_vfs_;
-                std::string outer_db_uri = "file:" + urlencode(outer_db_filename);
+                std::string outer_db_uri = "file:" + urlencode(outer_db_filename, true);
                 bool unsafe = sqlite3_uri_boolean(zName, "outer_unsafe", 0);
                 if (sName == "/__web__") {
-                    outer_db_uri += "?immutable=1&web_url=";
+                    outer_db_uri += "?immutable=1&vfs=web&web_url=";
                     outer_db_uri += urlencode(sqlite3_uri_parameter(zName, "web_url"));
+                    flags &= ~(SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
                     flags |= SQLITE_OPEN_READONLY;
                     vfs = "web";
                 } else if (unsafe) {
@@ -1063,6 +1064,7 @@ class VFS : public SQLiteVFS::Wrapper {
                 } else if (sqlite3_uri_boolean(zName, "immutable", 0)) {
                     outer_db_uri += "?immutable=1";
                 }
+                _DBG << outer_db_uri << _EOL;
 
                 try {
                     // open outer database
