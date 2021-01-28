@@ -23,6 +23,10 @@ jobs:
       run: |
         brew install python sqlite zstd samtools aria2
         /usr/local/bin/pip3 install pytest pytest-xdist
+        curl --version
+        which curl
+        otool -L $(which curl)
+        brew list --versions
     - name: build
       run: |
         CXXFLAGS="-I$(brew --prefix)/include -I$(brew --prefix)/opt/sqlite/include" \
