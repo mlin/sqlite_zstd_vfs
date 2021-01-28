@@ -303,13 +303,17 @@ def test_tpch(tmpdir):
 
 
 def test_web():
+    # compressed db served from GitHub Releases. if we change the db schema then we'll need to
+    # update accordingly (with a version generated locally by TPC-H.py)
     DB_URL = (
         "https://github.com/mlin/sqlite_zstd_vfs/releases/download/web-test-db-v1/TPC-H.zstd.db"
     )
     con = sqlite3.connect(f":memory:")
     con.enable_load_extension(True)
     con.load_extension(os.path.join(BUILD, "zstd_vfs"))
-    con = sqlite3.connect(f"file:/__web__?vfs=zstd&web_url={urllib.parse.quote(DB_URL)}", uri=True)
+    con = sqlite3.connect(
+        f"file:/__web__?vfs=zstd&mode=ro&immutable=1&web_url={urllib.parse.quote(DB_URL)}", uri=True
+    )
     con.executescript("PRAGMA cache_size=-262144")
 
     schema = list(con.execute("select type, name from sqlite_master"))
