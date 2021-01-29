@@ -28,13 +28,22 @@ include_directories(${sqlitecpp_SOURCE_DIR}/include)
 FetchContent_Declare(
     sqlite_web_vfs
     GIT_REPOSITORY  https://github.com/mlin/sqlite_web_vfs.git
-    GIT_TAG         749b264
+    GIT_TAG         3855b43
 )
 FetchContent_MakeAvailable(sqlite_web_vfs)
 FetchContent_MakeAvailable(concurrentqueue)
 include_directories(${concurrentqueue_SOURCE_DIR})
 include_directories(${sqlite_web_vfs_SOURCE_DIR}/src)
-add_definitions(-DHTTP_LAZYCURL)
+if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
+    # Don't dlopen() libcurl until first attempt to use web_vfs -- avoids loading its large tree of
+    # shared library dependencies in most cases. Enabled only for Linux because it seemed to cause
+    # libcurl routines to intermittently segfault in the macOS Python tests, which we haven't had
+    # time to track down yet.
+    add_definitions(-DHTTP_LAZYCURL)
+    set(LINK_LIBCURL "")
+else()
+    set(LINK_LIBCURL curl)
+ENDIF()
 
 project(sqlite_nested_vfs VERSION 1.0
         DESCRIPTION "SQLite VFS extension storing database pages in...a SQLite database"
@@ -46,11 +55,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(nested_vfs SHARED src/nested_vfs.cc src/SQLiteNestedVFS.h)
 SET_TARGET_PROPERTIES(nested_vfs PROPERTIES PREFIX "")
-target_link_libraries(nested_vfs PRIVATE SQLiteCpp)
+target_link_libraries(nested_vfs PRIVATE SQLiteCpp ${LINK_LIBCURL})
 
 add_library(zstd_vfs SHARED src/zstd_vfs.cc src/SQLiteNestedVFS.h src/zstd_vfs.h)
 SET_TARGET_PROPERTIES(zstd_vfs PROPERTIES PREFIX "")
-target_link_libraries(zstd_vfs PRIVATE SQLiteCpp zstd)
+target_link_libraries(zstd_vfs PRIVATE SQLiteCpp zstd ${LINK_LIBCURL})
 
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     FetchContent_Declare(
