@@ -29,7 +29,7 @@ include_directories(${sqlitecpp_SOURCE_DIR}/include)
 FetchContent_Declare(
     sqlite_web_vfs
     GIT_REPOSITORY  https://github.com/mlin/sqlite_web_vfs.git
-    GIT_TAG         3855b43
+    GIT_TAG         737316d
 )
 FetchContent_MakeAvailable(sqlite_web_vfs)
 FetchContent_MakeAvailable(concurrentqueue)
@@ -54,15 +54,15 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(nested_vfs SHARED src/nested_vfs.cc src/SQLiteNestedVFS.h)
-SET_TARGET_PROPERTIES(nested_vfs PROPERTIES PREFIX "")
-target_link_libraries(nested_vfs PRIVATE SQLiteCpp ${LINK_LIBCURL})
-
-add_library(zstd_vfs SHARED src/zstd_vfs.cc src/SQLiteNestedVFS.h src/zstd_vfs.h)
-SET_TARGET_PROPERTIES(zstd_vfs PROPERTIES PREFIX "")
-target_link_libraries(zstd_vfs PRIVATE SQLiteCpp zstd ${LINK_LIBCURL})
-
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+    add_library(nested_vfs SHARED src/nested_vfs.cc src/SQLiteNestedVFS.h)
+    SET_TARGET_PROPERTIES(nested_vfs PROPERTIES PREFIX "")
+    target_link_libraries(nested_vfs PRIVATE SQLiteCpp ${LINK_LIBCURL})
+
+    add_library(zstd_vfs SHARED src/zstd_vfs.cc src/SQLiteNestedVFS.h src/zstd_vfs.h)
+    SET_TARGET_PROPERTIES(zstd_vfs PROPERTIES PREFIX "")
+    target_link_libraries(zstd_vfs PRIVATE SQLiteCpp zstd ${LINK_LIBCURL})
+
     FetchContent_Declare(
         catch
         GIT_REPOSITORY  https://github.com/catchorg/Catch2.git
