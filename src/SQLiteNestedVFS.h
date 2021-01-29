@@ -1054,7 +1054,7 @@ class VFS : public SQLiteVFS::Wrapper {
                 std::string outer_db_uri = "file:" + urlencode(outer_db_filename, true);
                 bool unsafe = sqlite3_uri_boolean(zName, "outer_unsafe", 0);
                 if (sName == "/__web__") {
-                    outer_db_uri += "?immutable=1&vfs=web&web_url=";
+                    outer_db_uri += "?immutable=1&web_url=";
                     outer_db_uri += urlencode(sqlite3_uri_parameter(zName, "web_url"));
                     flags &= ~(SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
                     flags |= SQLITE_OPEN_READONLY;
