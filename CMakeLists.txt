@@ -34,7 +34,7 @@ FetchContent_MakeAvailable(sqlite_web_vfs)
 FetchContent_MakeAvailable(concurrentqueue)
 include_directories(${concurrentqueue_SOURCE_DIR})
 include_directories(${sqlite_web_vfs_SOURCE_DIR}/src)
-#add_definitions(-DHTTP_LAZYCURL)
+add_definitions(-DHTTP_LAZYCURL)
 
 project(sqlite_nested_vfs VERSION 1.0
         DESCRIPTION "SQLite VFS extension storing database pages in...a SQLite database"
@@ -46,11 +46,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(nested_vfs SHARED src/nested_vfs.cc src/SQLiteNestedVFS.h)
 SET_TARGET_PROPERTIES(nested_vfs PROPERTIES PREFIX "")
-target_link_libraries(nested_vfs PRIVATE SQLiteCpp curl)
+target_link_libraries(nested_vfs PRIVATE SQLiteCpp)
 
 add_library(zstd_vfs SHARED src/zstd_vfs.cc src/SQLiteNestedVFS.h src/zstd_vfs.h)
 SET_TARGET_PROPERTIES(zstd_vfs PROPERTIES PREFIX "")
-target_link_libraries(zstd_vfs PRIVATE SQLiteCpp zstd curl)
+target_link_libraries(zstd_vfs PRIVATE SQLiteCpp zstd)
 
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     FetchContent_Declare(
