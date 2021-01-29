@@ -28,7 +28,7 @@ include_directories(${sqlitecpp_SOURCE_DIR}/include)
 FetchContent_Declare(
     sqlite_web_vfs
     GIT_REPOSITORY  https://github.com/mlin/sqlite_web_vfs.git
-    GIT_TAG         333fa3f
+    GIT_TAG         70de42e
 )
 FetchContent_MakeAvailable(sqlite_web_vfs)
 FetchContent_MakeAvailable(concurrentqueue)
