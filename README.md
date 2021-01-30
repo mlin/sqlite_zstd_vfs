@@ -85,6 +85,8 @@ sqlite3 :memory: -bail \
 
 Repeat the query to see the update.
 
+The extension also *includes* [web_vfs](https://github.com/mlin/sqlite_web_vfs). A compressed database can be read from a HTTP(S) URL by opening the URI `file:/__web__?vfs=zstd&mode=ro&immutable=1&web_url={{PERCENT_ENCODED_URL}}`.
+
 ## Limitations
 
 * Linux x86-64 oriented; help wanted for other targets.

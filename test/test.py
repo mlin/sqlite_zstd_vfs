@@ -7,6 +7,7 @@ import json
 import contextlib
 import time
 import sqlite3
+import urllib.parse
 import pytest
 
 HERE = os.path.dirname(__file__)
@@ -299,3 +300,44 @@ def test_tpch(tmpdir):
     assert results["zstd_db_size"] * 2 < results["db_size"]
     assert results["Q1"] * 2 > results["zstd_Q1"]
     assert results["Q8"] * 4 > results["zstd_Q8"]
+
+
+def test_web():
+    # compressed db served from GitHub Releases. if we change the db schema then we'll need to
+    # update accordingly (with a version generated locally by TPC-H.py)
+    DB_URL = (
+        "https://github.com/mlin/sqlite_zstd_vfs/releases/download/web-test-db-v1/TPC-H.zstd.db"
+    )
+    con = sqlite3.connect(f":memory:")
+    con.enable_load_extension(True)
+    con.load_extension(os.path.join(BUILD, "zstd_vfs"))
+    con = sqlite3.connect(
+        f"file:/__web__?vfs=zstd&mode=ro&immutable=1&web_url={urllib.parse.quote(DB_URL)}", uri=True
+    )
+    con.executescript("PRAGMA cache_size=-262144")
+
+    schema = list(con.execute("select type, name from sqlite_master"))
+    print(schema)
+    sys.stdout.flush()
+
+    results = list(
+        con.execute(
+            """
+            select
+                l_returnflag,
+                l_linestatus,
+                sum(l_quantity) as sum_qty,
+                sum(l_extendedprice) as sum_base_price,
+                sum(l_extendedprice*(1-l_discount)) as sum_disc_price,
+                sum(l_extendedprice*(1-l_discount)*(1+l_tax)) as sum_charge,
+                avg(l_quantity) as avg_qty,
+                avg(l_extendedprice) as avg_price,
+                avg(l_discount) as avg_disc, count(*) as count_order
+            from lineitem
+            where l_shipdate <= date('1998-12-01', '-90 day')
+            group by l_returnflag, l_linestatus order by l_returnflag, l_linestatus;
+            """
+        )
+    )
+    print(results)
+    sys.stdout.flush()
