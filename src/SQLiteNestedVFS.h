@@ -949,7 +949,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
   public:
     InnerDatabaseFile(std::unique_ptr<SQLite::Database> &&outer_db,
                       const std::string &inner_db_tablename_prefix, bool read_only, size_t threads,
-                      bool noprefetch)
+                      bool noprefetch, bool web)
         : outer_db_(std::move(outer_db)),
           inner_db_pages_table_(inner_db_tablename_prefix + "pages"), read_only_(read_only),
           // MAX(pageno) instead of COUNT(pageno) because the latter would trigger table scan
@@ -962,7 +962,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         assert(threads);
         fetch_jobs_.reserve(MAX_FETCH_CURSORS); // important! ensure fetch_jobs_.data() never moves
         methods_.iVersion = 1;
-        assert(outer_db_->execAndGet("PRAGMA quick_check").getString() == "ok");
+        assert(web || outer_db_->execAndGet("PRAGMA quick_check").getString() == "ok");
     }
 }; // namespace SQLiteNested
 
@@ -1024,9 +1024,9 @@ class VFS : public SQLiteVFS::Wrapper {
 
     virtual std::unique_ptr<SQLiteVFS::File>
     NewInnerDatabaseFile(const char *zName, std::unique_ptr<SQLite::Database> &&outer_db,
-                         bool read_only, size_t threads, bool noprefetch) {
+                         bool read_only, size_t threads, bool noprefetch, bool web) {
         return std::unique_ptr<SQLiteVFS::File>(new InnerDatabaseFile(
-            std::move(outer_db), inner_db_tablename_prefix_, read_only, threads, noprefetch));
+            std::move(outer_db), inner_db_tablename_prefix_, read_only, threads, noprefetch, web));
     }
 
     int Open(const char *zName, sqlite3_file *pFile, int flags, int *pOutFlags) override {
@@ -1035,7 +1035,8 @@ class VFS : public SQLiteVFS::Wrapper {
             if (flags & SQLITE_OPEN_MAIN_DB) {
                 // strip inner_db_filename_suffix_ to get filename of outer database
                 std::string outer_db_filename = sName;
-                if (sName != "/__web__") {
+                bool web = sName == "/__web__";
+                if (!web) {
                     if (sName.size() > inner_db_filename_suffix_.size()) {
                         outer_db_filename =
                             sName.substr(0, sName.size() - inner_db_filename_suffix_.size());
@@ -1053,7 +1054,7 @@ class VFS : public SQLiteVFS::Wrapper {
                 std::string vfs = outer_vfs_;
                 std::string outer_db_uri = "file:" + urlencode(outer_db_filename, true);
                 bool unsafe = sqlite3_uri_boolean(zName, "outer_unsafe", 0);
-                if (sName == "/__web__") {
+                if (web) {
                     outer_db_uri += "?immutable=1&web_url=";
                     outer_db_uri += urlencode(sqlite3_uri_parameter(zName, "web_url"));
                     flags &= ~(SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
@@ -1113,7 +1114,7 @@ class VFS : public SQLiteVFS::Wrapper {
 
                     auto idbf = NewInnerDatabaseFile(zName, std::move(outer_db),
                                                      (flags & SQLITE_OPEN_READONLY),
-                                                     (size_t)threads, noprefetch);
+                                                     (size_t)threads, noprefetch, web);
                     idbf->InitHandle(pFile);
                     assert(pFile->pMethods);
                     idbf.release();
