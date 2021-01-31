@@ -1060,6 +1060,10 @@ class VFS : public SQLiteVFS::Wrapper {
                     flags &= ~(SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
                     flags |= SQLITE_OPEN_READONLY;
                     vfs = "web";
+                    if (sqlite3_uri_parameter(zName, "web_log")) {
+                        outer_db_uri +=
+                            "?web_log=" + urlencode(sqlite3_uri_parameter(zName, "web_log"));
+                    }
                 } else if (unsafe) {
                     outer_db_uri += "?nolock=1&psow=1";
                 } else if (sqlite3_uri_boolean(zName, "immutable", 0)) {
