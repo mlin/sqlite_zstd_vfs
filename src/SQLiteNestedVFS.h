@@ -1055,15 +1055,16 @@ class VFS : public SQLiteVFS::Wrapper {
                 std::string outer_db_uri = "file:" + urlencode(outer_db_filename, true);
                 bool unsafe = sqlite3_uri_boolean(zName, "outer_unsafe", 0);
                 if (web) {
-                    outer_db_uri += "?immutable=1&web_url=";
-                    outer_db_uri += urlencode(sqlite3_uri_parameter(zName, "web_url"));
+                    outer_db_uri += "?immutable=1";
+                    for (const char *passthrough : {"web_log", "web_insecure", "web_url"}) {
+                        if (sqlite3_uri_parameter(zName, passthrough)) {
+                            outer_db_uri += std::string("&") + passthrough + std::string("=") +
+                                            urlencode(sqlite3_uri_parameter(zName, passthrough));
+                        }
+                    }
                     flags &= ~(SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
                     flags |= SQLITE_OPEN_READONLY;
                     vfs = "web";
-                    if (sqlite3_uri_parameter(zName, "web_log")) {
-                        outer_db_uri +=
-                            "?web_log=" + urlencode(sqlite3_uri_parameter(zName, "web_log"));
-                    }
                 } else if (unsafe) {
                     outer_db_uri += "?nolock=1&psow=1";
                 } else if (sqlite3_uri_boolean(zName, "immutable", 0)) {
