@@ -138,6 +138,10 @@ def test_roundtrip_zstd(tmpdir, chinook_file):
     linkcon = sqlite3.connect(f"file:{linkpath}?vfs=zstd", uri=True)
     linkcon.execute("select 1")
 
+    # verify application_id
+    outer = sqlite3.connect(dbfn)
+    assert next(outer.execute("PRAGMA application_id"))[0] == 0x7A737464
+
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="must run in docker")
 def test_db_in_root():
@@ -159,6 +163,10 @@ def test_vacuum(tmpdir, chinook_file):
     con.load_extension(os.path.join(BUILD, "zstd_vfs"))
     dbfn = os.path.join(tmpdir, "chinook_zstd_vacuum.sqlite")
     con.execute(f"VACUUM INTO 'file:{dbfn}?vfs=zstd'")
+
+    # verify application_id
+    outer = sqlite3.connect(dbfn)
+    assert next(outer.execute("PRAGMA application_id"))[0] == 0x7A737464
 
     # dump from the zstd version
     rslt = subprocess.run(
@@ -252,9 +260,10 @@ def test_sam(tmpdir):
     ratio = float(zstd_sqlite_size) / sam_zst_size
     assert ratio <= 1.6
 
-    # verify outer page size
+    # verify outer page size and application_id
     con = sqlite3.connect(f"file:{zstd_sqlite}?mode=ro", uri=True)
     assert next(con.execute("PRAGMA page_size"))[0] == outer_page_size
+    assert next(con.execute("PRAGMA application_id"))[0] == 0x7A737464
 
     # verify inner page size
     con.enable_load_extension(True)

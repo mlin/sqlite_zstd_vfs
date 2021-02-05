@@ -374,7 +374,8 @@ class ZstdVFS : public SQLiteNested::VFS {
         SQLiteNested::VFS::InitOuterDB(db);
         std::vector<const char *> ddl = {
             "CREATE TABLE nested_vfs_zstd_dicts (id INTEGER PRIMARY KEY AUTOINCREMENT, dict BLOB "
-            "NOT NULL, page_count INTEGER NOT NULL); PRAGMA application_id=0x7a737464"};
+            "NOT NULL, page_count INTEGER NOT NULL)",
+            "PRAGMA application_id=0x7a737464"};
         for (const auto &stmt : ddl) {
             SQLite::Statement(db, stmt).executeStep();
         }

@@ -148,6 +148,10 @@ def run(cache_MiB, level, threads, inner_page_KiB, outer_page_KiB):
         con.close()
         assert results == expected_results[query_name]
 
+    # verify outer application_id
+    outer = sqlite3.connect("/tmp/TPC-H.zstd.db")
+    assert next(outer.execute("PRAGMA application_id"))[0] == 0x7A737464
+
     return timings
 
 
