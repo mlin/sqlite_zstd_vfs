@@ -1083,10 +1083,6 @@ class VFS : public SQLiteVFS::Wrapper {
                     if (unsafe) {
                         outer_db->exec(UNSAFE_PRAGMAS);
                     }
-                    auto outer_cache_size = sqlite3_uri_int64(zName, "outer_cache_size", 0);
-                    if (outer_cache_size) {
-                        outer_db->exec("PRAGMA cache_size=" + std::to_string(outer_cache_size));
-                    }
 
                     // check flags vs whether this appears to be a nested VFS database
                     bool is_outer_db = IsOuterDB(*outer_db);
@@ -1108,6 +1104,10 @@ class VFS : public SQLiteVFS::Wrapper {
                         txn.commit();
                     }
 
+                    auto outer_cache_size = sqlite3_uri_int64(zName, "outer_cache_size", 0);
+                    if (outer_cache_size) {
+                        outer_db->exec("PRAGMA cache_size=" + std::to_string(outer_cache_size));
+                    }
                     auto threads = sqlite3_uri_int64(zName, "threads", 1);
                     if (threads < 0) {
                         threads = sqlite3_int64(std::thread::hardware_concurrency()) - 1;
