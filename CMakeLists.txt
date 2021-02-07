@@ -35,16 +35,9 @@ FetchContent_MakeAvailable(sqlite_web_vfs)
 FetchContent_MakeAvailable(concurrentqueue)
 include_directories(${concurrentqueue_SOURCE_DIR})
 include_directories(${sqlite_web_vfs_SOURCE_DIR}/src)
-if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
-    # Don't dlopen() libcurl until first attempt to use web_vfs -- avoids loading its large tree of
-    # shared library dependencies in most cases. Enabled only for Linux because it seemed to cause
-    # libcurl routines to intermittently segfault in the macOS Python tests, which we haven't had
-    # time to track down yet.
-    add_definitions(-DHTTP_LAZYCURL)
-    set(LINK_LIBCURL "")
-else()
-    set(LINK_LIBCURL curl)
-ENDIF()
+# Don't dlopen() libcurl until first attempt to use web_vfs -- avoids loading its large tree of
+# shared library dependencies in most cases.
+add_definitions(-DHTTP_LAZYCURL)
 
 project(sqlite_nested_vfs VERSION 1.0
         DESCRIPTION "SQLite VFS extension storing database pages in...a SQLite database"
