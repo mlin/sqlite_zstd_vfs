@@ -690,22 +690,24 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 upsert->bind(3, job->meta2);
             }
             upsert->bind(4, job->pageno);
-            StatementResetter resetter(*upsert);
-            if (upsert->exec() != 1) {
-                throw std::runtime_error("unexpected result from page upsert");
-            }
 
-            if (page1plain_ && job->pageno == 1) {
-                // see ReadPlainPage1() above. When we write page 1, cc its first 100 bytes into a
-                // special row with pageno = -100.
-                upsert->reset();
-                upsert->bindNoCopy(1, job->encoded_page,
-                                   std::min(job->encoded_page_size, size_t(100)));
-                upsert->bind(2, job->meta1);
-                upsert->bind(3, job->meta2);
-                upsert->bind(4, (sqlite_int64)-100);
+            {
+                StatementResetter resetter(*upsert);
                 if (upsert->exec() != 1) {
-                    throw std::runtime_error("unexpected result from header upsert");
+                    throw std::runtime_error("unexpected result from page upsert");
+                }
+
+                if (page1plain_ && job->pageno == 1) {
+                    // see ReadPlainPage1() above. When we write page 1, cc its first 100 bytes
+                    // into a special row with pageno = -100.
+                    upsert->reset();
+                    upsert->bindNoCopy(1, job->encoded_page,
+                                    std::min(job->encoded_page_size, size_t(100)));
+                    // keep meta1 & meta2 bindings, if any
+                    upsert->bind(4, (sqlite_int64)-100);
+                    if (upsert->exec() != 1) {
+                        throw std::runtime_error("unexpected result from header upsert");
+                    }
                 }
             }
 
