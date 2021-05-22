@@ -276,13 +276,16 @@ def test_sam(tmpdir):
     con.load_extension(os.path.join(BUILD, "zstd_vfs"))
     con = sqlite3.connect(f"file:{zstd_sqlite}?mode=ro&vfs=zstd", uri=True)
     assert next(con.execute("PRAGMA page_size"))[0] == page_size
-    btree_interior_pages_actual = set(
-        con.execute("select pageno from dbstat where pagetype='internal'")
-    )
-    assert 10 < len(btree_interior_pages_actual) < 100
-    assert not (
-        btree_interior_pages_actual - btree_interior_pages_expected
-    )  # this is a subset because expected includes dead pages
+    try:
+        btree_interior_pages_actual = set(
+            con.execute("select pageno from dbstat where pagetype='internal'")
+        )
+        assert 10 < len(btree_interior_pages_actual) < 100
+        assert not (
+            btree_interior_pages_actual - btree_interior_pages_expected
+        )  # this is a subset because expected includes dead pages
+    except sqlite3.OperationalError as exn:
+        assert "no such table: dbstat" in str(exn)  # tolerate absence from system build
 
     if expected_posflag:
         con.execute("PRAGMA threads=8")
