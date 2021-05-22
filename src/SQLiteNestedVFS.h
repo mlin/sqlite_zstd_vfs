@@ -11,6 +11,14 @@
  * pages can be prefetched and decoded on background threads during detected sequential scans.
  * These schemes are each a bit complex but at least they're separate: when asked to read a page,
  * we first wait for any outstanding writes to finish, and vice-versa.
+ *
+ * Alongside the pages table in the outer database, we maintain a covering index of the subset of
+ * pages that constitute the interior b-tree nodes (see https://www.sqlite.org/fileformat.html).
+ * These pages are normally scattered arbitrarily throughout the main database file, but the
+ * covering index stores a more-contiguous copy of them (at least once the outer database is
+ * vacuumed). This can improve I/O performance in high-latency settings like web_vfs, since the
+ * interior pages are key for navigating the database, and they're typically only a very small
+ * fraction of the total space.
  */
 #pragma once
 
@@ -57,6 +65,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     std::unique_ptr<SQLite::Database> outer_db_;
     std::string inner_db_pages_table_;
     bool read_only_;
+
+    std::string btree_interior_index_;
 
     /**********************************************************************************************
      * Database file geometry
@@ -167,16 +177,18 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         void *dest = nullptr;        // If non-null, decode page directly here (foreground fetch)
         std::vector<char> decodebuf; // otherwise decode into this buffer (background fetch)
 
-        SQLite::Statement cursor;        // outer db cursor
+        SQLite::Statement cursor; // outer db cursor
+        std::unique_ptr<SQLite::Statement> btree_interior_cursor;
         sqlite3_int64 cursor_pageno = 0; // if >0 then cursor is currently on this page
         unsigned long long last_op = 0;  // "time" of the cursor's last use
         bool was_sequential = false;
 
         const void *src = nullptr; // outer db page to be decoded
         int src_size = 0;
+        std::unique_ptr<SQLite::Column> src_meta1, src_meta2;
 
         // counters
-        sqlite3_int64 sequential = 0, non_sequential = 0;
+        sqlite3_int64 sequential = 0, non_sequential = 0, interior_hits = 0;
         std::chrono::nanoseconds t_seek = std::chrono::nanoseconds::zero(),
                                  t_decode = std::chrono::nanoseconds::zero();
 
@@ -186,9 +198,16 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                                             " WHERE pageno >= ? ORDER BY pageno"),
               page_size(that.page_size_) {
             PutState(State::NEW);
+            if (!that.btree_interior_index_.empty()) {
+                btree_interior_cursor.reset(new SQLite::Statement(
+                    *(that.outer_db_), "SELECT pageno, data, meta1, meta2 FROM " +
+                                           that.inner_db_pages_table_ + " INDEXED BY " +
+                                           that.btree_interior_index_ +
+                                           " WHERE btree_interior AND pageno = ?"));
+            }
         }
 
-        virtual ~FetchJob() {}
+        virtual ~FetchJob() { ResetCursor(); }
 
         inline void *EffectiveDest() noexcept {
             return dest ? dest : (decodebuf.resize(page_size), decodebuf.data());
@@ -206,10 +225,10 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
         // reset the outer database cursor; should be done when it otherwise might go stale.
         virtual void ResetCursor() {
-            if (cursor_pageno > 0) {
-                cursor.reset();
-                cursor_pageno = 0;
-            }
+            src_meta1.reset();
+            src_meta2.reset();
+            cursor.reset();
+            cursor_pageno = 0;
             last_op = 0;
         }
 
@@ -221,33 +240,53 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 #endif
             assert(pageno > 0);
             assert(errmsg.empty() && !src && !src_size);
+            bool btree_interior = false;
             if (cursor_pageno != pageno) {
-                if (cursor_pageno + 1 == pageno && cursor_pageno) {
-                    was_sequential = true;
-#ifndef NDEBUG
-                    sequential++;
-#endif
-                } else {
-                    ResetCursor();
-                    cursor.bind(1, pageno);
+                if (!(cursor_pageno && cursor_pageno + 1 == pageno)) {
                     was_sequential = false;
 #ifndef NDEBUG
                     non_sequential++;
 #endif
+                    // first try the covering index of interior btree pages
+                    if (btree_interior_cursor &&
+                        (btree_interior_cursor->reset(), btree_interior_cursor->bind(1, pageno),
+                         btree_interior_cursor->executeStep())) {
+                        btree_interior = true;
+#ifndef NDEBUG
+                        interior_hits++;
+#endif
+                    } else {
+                        // otherwise seek the main cursor
+                        ResetCursor();
+                        cursor.bind(1, pageno);
+                    }
+                } else {
+                    // main cursor will naturally step to the desired page
+                    was_sequential = true;
+#ifndef NDEBUG
+                    sequential++;
+#endif
                 }
-                if (!cursor.executeStep() || cursor.getColumn(0).getInt64() != pageno) {
-                    throw SQLite::Exception("missing page " + std::to_string(pageno),
-                                            SQLITE_CORRUPT);
+                if (!btree_interior) {
+                    if (!cursor.executeStep() || cursor.getColumn(0).getInt64() != pageno) {
+                        throw SQLite::Exception("missing page " + std::to_string(pageno),
+                                                SQLITE_CORRUPT);
+                    }
+                    cursor_pageno = pageno;
                 }
-                cursor_pageno = pageno;
             }
-            SQLite::Column data = cursor.getColumn(1);
+            SQLite::Statement &eff_cursor = btree_interior ? *btree_interior_cursor : cursor;
+            // load page data for DecodePage()
+            assert(eff_cursor.getColumn(0).getInt64() == pageno);
+            SQLite::Column data = eff_cursor.getColumn(1);
             assert(data.getName() == std::string("data"));
             src = data.getBlob();
             src_size = data.getBytes();
             if (src_size && (!src || !data.isBlob())) {
                 throw SQLite::Exception("corrupt page " + std::to_string(pageno), SQLITE_CORRUPT);
             }
+            src_meta1.reset(new SQLite::Column(eff_cursor.getColumn(2)));
+            src_meta2.reset(new SQLite::Column(eff_cursor.getColumn(3)));
 #ifndef NDEBUG
             t_seek += std::chrono::high_resolution_clock::now() - t0;
 #endif
@@ -276,7 +315,6 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             assert(!seek_lock || seek_lock->owns_lock());
             try {
                 SeekCursor();
-                assert(cursor_pageno == pageno);
                 if (seek_lock) {
                     seek_lock->unlock();
                 }
@@ -676,6 +714,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     // order
     void ExecuteUpsert(EncodeJob *pjob) noexcept {
         std::unique_ptr<EncodeJob> job(pjob);
+        assert(job->page.size() == page_size_);
         try {
             if (!job->errmsg.empty()) {
                 throw std::runtime_error(job->errmsg);
@@ -689,7 +728,14 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             if (!job->meta2null) {
                 upsert->bind(3, job->meta2);
             }
-            upsert->bind(4, job->pageno);
+            if (btree_interior_index_.empty()) {
+                upsert->bind(4, job->pageno);
+            } else {
+                // set flag if this is an interior b-tree page, as detailed:
+                //   https://www.sqlite.org/fileformat.html
+                upsert->bind(4, job->pageno > 1 && (job->page[0] == 2 || job->page[0] == 5));
+                upsert->bind(5, job->pageno);
+            }
 
             {
                 StatementResetter resetter(*upsert);
@@ -702,9 +748,9 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                     // into a special row with pageno = -100.
                     upsert->reset();
                     upsert->bindNoCopy(1, job->encoded_page,
-                                    std::min(job->encoded_page_size, size_t(100)));
+                                       std::min(job->encoded_page_size, size_t(100)));
                     // keep meta1 & meta2 bindings, if any
-                    upsert->bind(4, (sqlite_int64)-100);
+                    upsert->bind(btree_interior_index_.empty() ? 4 : 5, (sqlite_int64)-100);
                     if (upsert->exec() != 1) {
                         throw std::runtime_error("unexpected result from header upsert");
                     }
@@ -751,14 +797,22 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             }
 
             if (!insert_page_) {
-                insert_page_.reset(new SQLite::Statement(
-                    *outer_db_, "INSERT INTO " + inner_db_pages_table_ +
-                                    "(data,meta1,meta2,pageno) VALUES(?,?,?,?)"));
+                auto sql = "INSERT INTO " + inner_db_pages_table_;
+                if (btree_interior_index_.empty()) {
+                    sql += "(data,meta1,meta2,pageno) VALUES(?,?,?,?)";
+                } else {
+                    sql += "(data,meta1,meta2,btree_interior,pageno) VALUES(?,?,?,?,?)";
+                }
+                insert_page_.reset(new SQLite::Statement(*outer_db_, sql));
             }
             if (!update_page_) {
-                update_page_.reset(new SQLite::Statement(
-                    *outer_db_, "UPDATE " + inner_db_pages_table_ +
-                                    " SET data=?, meta1=?, meta2=? WHERE pageno=?"));
+                auto sql = "UPDATE " + inner_db_pages_table_ + " SET data=?, meta1=?, meta2=?";
+                if (btree_interior_index_.empty()) {
+                    sql += " WHERE pageno=?";
+                } else {
+                    sql += ", btree_interior=? WHERE pageno=?";
+                }
+                update_page_.reset(new SQLite::Statement(*outer_db_, sql));
             }
 
             begin();
@@ -902,19 +956,21 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             _DBG << exn.what() << _EOL;
             return exn.getErrorCode();
         }
-        unsigned long long sequential = 0, non_sequential = 0;
+        unsigned long long sequential = 0, non_sequential = 0, interior_hits = 0;
         std::chrono::nanoseconds t_seek = std::chrono::nanoseconds::zero(),
                                  t_decode = std::chrono::nanoseconds::zero();
         for (const auto &job : fetch_jobs_) {
             sequential += job->sequential;
             non_sequential += job->non_sequential;
+            interior_hits += job->interior_hits;
             t_seek += job->t_seek;
             t_decode += job->t_decode;
         }
         if (sequential + non_sequential) {
             _DBG << "reads sequential: " << sequential << " non-sequential: " << non_sequential
-                 << " longest: " << longest_read_ << " prefetched: " << prefetch_wins_
-                 << " wasted: " << prefetch_wasted_ << " seek: " << t_seek.count() / 1000000
+                 << " interior: " << interior_hits << " longest: " << longest_read_
+                 << " prefetched: " << prefetch_wins_ << " wasted: " << prefetch_wasted_
+                 << " seek: " << t_seek.count() / 1000000
                  << "ms decode: " << t_decode.count() / 1000000 << "ms" << _EOL;
         }
         return SQLiteVFS::File::Close();
@@ -965,6 +1021,16 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         fetch_jobs_.reserve(MAX_FETCH_CURSORS); // important! ensure fetch_jobs_.data() never moves
         methods_.iVersion = 1;
         assert(web || outer_db_->execAndGet("PRAGMA quick_check").getString() == "ok");
+
+        // detect if btree interior index is available
+        btree_interior_index_ = inner_db_pages_table_ + "_btree_interior";
+        if (outer_db_
+                ->execAndGet(
+                    "SELECT count(1) FROM sqlite_master WHERE type = 'index' AND name = '" +
+                    btree_interior_index_ + "'")
+                .getInt() != 1) {
+            btree_interior_index_.clear();
+        }
     }
 }; // namespace SQLiteNested
 
@@ -1017,11 +1083,16 @@ class VFS : public SQLiteVFS::Wrapper {
                                     SQLITE_CANTOPEN);
         }
         std::vector<std::pair<const char *, const char *>> ddl = {
-            {"CREATE TABLE ",
-             "pages (pageno INTEGER PRIMARY KEY, data BLOB NOT NULL, meta1 BLOB, meta2 BLOB)"}};
+            {"CREATE TABLE ", "pages (pageno INTEGER PRIMARY KEY, data BLOB NOT NULL, meta1 BLOB, "
+                              "meta2 BLOB, btree_interior BOOLEAN)"}};
         for (const auto &p : ddl) {
             SQLite::Statement(db, p.first + inner_db_tablename_prefix_ + p.second).executeStep();
         }
+        // covering index of interior btree pages
+        SQLite::Statement(db, "CREATE INDEX " + inner_db_tablename_prefix_ +
+                                  "pages_btree_interior ON " + inner_db_tablename_prefix_ +
+                                  "pages (pageno,data,meta1,meta2) WHERE btree_interior")
+            .executeStep();
     }
 
     virtual std::unique_ptr<SQLiteVFS::File>

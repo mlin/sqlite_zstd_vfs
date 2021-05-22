@@ -131,12 +131,11 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
 #endif
             ddict = nullptr;
             plain = false;
-            auto meta1 = cursor.getColumn(2);
-            assert(std::string(meta1.getName()) == "meta1");
-            if (meta1.isNull()) {
+            assert(std::string(src_meta1->getName()) == "meta1");
+            if (src_meta1->isNull()) {
                 plain = true;
-            } else if (meta1.isInteger()) {
-                sqlite3_int64 dict_id = meta1.getInt64();
+            } else if (src_meta1->isInteger()) {
+                sqlite3_int64 dict_id = src_meta1->getInt64();
                 ddict = dict_id >= 0 ? that->EnsureDictCached(dict_id).ensure_ddict() : nullptr;
             } else {
                 throw SQLite::Exception("unexpected meta1 entry in zstd page table",
