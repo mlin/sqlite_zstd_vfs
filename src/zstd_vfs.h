@@ -124,26 +124,20 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
         // After superclass seeks to a page, make sure we have the necessary decompression
         // dictionary ready for use. This has to be done in this serialized method since it may
         // need to load it from the outer db.
-        void SeekCursor() override {
-            super::FetchJob::SeekCursor();
-#ifndef NDEBUG
-            auto t0 = std::chrono::high_resolution_clock::now();
-#endif
+        void LoadMeta(SQLite::Statement &sought_cursor) override {
             ddict = nullptr;
             plain = false;
-            assert(std::string(src_meta1->getName()) == "meta1");
-            if (src_meta1->isNull()) {
+            SQLite::Column meta1 = sought_cursor.getColumn(2);
+            assert(std::string(meta1.getName()) == "meta1");
+            if (meta1.isNull()) {
                 plain = true;
-            } else if (src_meta1->isInteger()) {
-                sqlite3_int64 dict_id = src_meta1->getInt64();
+            } else if (meta1.isInteger()) {
+                sqlite3_int64 dict_id = meta1.getInt64();
                 ddict = dict_id >= 0 ? that->EnsureDictCached(dict_id).ensure_ddict() : nullptr;
             } else {
                 throw SQLite::Exception("unexpected meta1 entry in zstd page table",
                                         SQLITE_CORRUPT);
             }
-#ifndef NDEBUG
-            t_seek += std::chrono::high_resolution_clock::now() - t0;
-#endif
         }
 
         // Perform decompression using dctx & ddict

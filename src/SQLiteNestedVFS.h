@@ -12,13 +12,12 @@
  * These schemes are each a bit complex but at least they're separate: when asked to read a page,
  * we first wait for any outstanding writes to finish, and vice-versa.
  *
- * Alongside the pages table in the outer database, we maintain a covering index of the subset of
- * pages that constitute the interior b-tree nodes (see https://www.sqlite.org/fileformat.html).
- * These pages are normally scattered arbitrarily throughout the main database file, but the
- * covering index stores a more-contiguous copy of them (at least once the outer database is
- * vacuumed). This can improve I/O performance in high-latency settings like web_vfs, since the
- * interior pages are key for navigating the database, and they're typically only a very small
- * fraction of the total space.
+ * Alongside the table of pages, we maintain a covering index of the subset constituting interior
+ * b-tree nodes (see https://www.sqlite.org/fileformat.html). These pages are normally scattered
+ * arbitrarily throughout the main database file, and this index maintains a more-contiguous copy
+ * of them (at least, once the outer database is vacuumed). That can improve I/O performance in
+ * high-latency environments like web_vfs, since the interior pages are key for navigating the
+ * database file; and they're typically only a small fraction of the total space.
  */
 #pragma once
 
@@ -225,8 +224,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
         // reset the outer database cursor; should be done when it otherwise might go stale.
         virtual void ResetCursor() {
-            src_meta1.reset();
-            src_meta2.reset();
+            src = nullptr;
+            src_size = 0;
             cursor.reset();
             cursor_pageno = 0;
             last_op = 0;
@@ -234,7 +233,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
         // move cursor to pageno, by next() if possible, otherwise from scratch. these operations
         // must be serialized, as they deal with the outer db.
-        virtual void SeekCursor() {
+        void SeekCursor() {
 #ifndef NDEBUG
             auto t0 = std::chrono::high_resolution_clock::now();
 #endif
@@ -275,22 +274,23 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                     cursor_pageno = pageno;
                 }
             }
-            SQLite::Statement &eff_cursor = btree_interior ? *btree_interior_cursor : cursor;
-            // load page data for DecodePage()
-            assert(eff_cursor.getColumn(0).getInt64() == pageno);
-            SQLite::Column data = eff_cursor.getColumn(1);
+            SQLite::Statement &sought_cursor = btree_interior ? *btree_interior_cursor : cursor;
+            assert(sought_cursor.getColumn(0).getInt64() == pageno);
+            SQLite::Column data = sought_cursor.getColumn(1);
             assert(data.getName() == std::string("data"));
             src = data.getBlob();
             src_size = data.getBytes();
             if (src_size && (!src || !data.isBlob())) {
                 throw SQLite::Exception("corrupt page " + std::to_string(pageno), SQLITE_CORRUPT);
             }
-            src_meta1.reset(new SQLite::Column(eff_cursor.getColumn(2)));
-            src_meta2.reset(new SQLite::Column(eff_cursor.getColumn(3)));
+            LoadMeta(sought_cursor);
 #ifndef NDEBUG
             t_seek += std::chrono::high_resolution_clock::now() - t0;
 #endif
         }
+
+        // At seek completion, process meta values as needed to prepare for decoding. Override me!
+        virtual void LoadMeta(SQLite::Statement &sought_cursor) {}
 
         // Decode one page from the blob stored in the outer db. Override me!
         // May parallelize with other jobs.
@@ -310,7 +310,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 #endif
         }
 
-        virtual void Execute(std::unique_lock<std::mutex> *seek_lock = nullptr) noexcept {
+        void Execute(std::unique_lock<std::mutex> *seek_lock = nullptr) noexcept {
             assert(GetState() == State::WIP);
             assert(!seek_lock || seek_lock->owns_lock());
             try {
@@ -1106,7 +1106,8 @@ class VFS : public SQLiteVFS::Wrapper {
         if (zName && zName[0]) {
             std::string sName(zName);
             if (flags & SQLITE_OPEN_MAIN_DB) {
-                // strip inner_db_filename_suffix_ to get filename of outer database
+                // strip inner_db_filename_suffix_ to get filename of outer database (see
+                // FullPathname below)
                 std::string outer_db_filename = sName;
                 bool web = sName == "/__web__";
                 if (!web) {
@@ -1128,6 +1129,7 @@ class VFS : public SQLiteVFS::Wrapper {
                 std::string outer_db_uri = "file:" + urlencode(outer_db_filename, true);
                 bool unsafe = sqlite3_uri_boolean(zName, "outer_unsafe", 0);
                 if (web) {
+                    // use sqlite_web_vfs, passing through configuration
                     outer_db_uri += "?immutable=1";
                     for (const char *passthrough : {"web_log", "web_insecure", "web_url"}) {
                         if (sqlite3_uri_parameter(zName, passthrough)) {
@@ -1225,10 +1227,11 @@ class VFS : public SQLiteVFS::Wrapper {
 
     // Given user-provided db filename, use it as the outer db on the host filesystem, and
     // append a suffix as the inner db's filename (which won't actually exist on the host
-    // filesystem, but xOpen() will recognize).
+    // filesystem, but xOpen() will recognize). This prevents name collisions between the journals.
     int FullPathname(const char *zName, int nPathOut, char *zPathOut) override {
         std::string zName2(zName);
         if (zName2 == "/__web__") {
+            // unnecessary for read-only web access
             strncpy(zPathOut, zName, nPathOut);
             return SQLITE_OK;
         }
