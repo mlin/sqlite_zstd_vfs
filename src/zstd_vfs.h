@@ -363,8 +363,8 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
 
 class ZstdVFS : public SQLiteNested::VFS {
   protected:
-    void InitOuterDB(SQLite::Database &db) override {
-        SQLiteNested::VFS::InitOuterDB(db);
+    void InitOuterDB(const char *zName, SQLite::Database &db) override {
+        SQLiteNested::VFS::InitOuterDB(zName, db);
         std::vector<const char *> ddl = {
             "CREATE TABLE nested_vfs_zstd_dicts (id INTEGER PRIMARY KEY AUTOINCREMENT, dict BLOB "
             "NOT NULL, page_count INTEGER NOT NULL)",

@@ -1076,7 +1076,7 @@ class VFS : public SQLiteVFS::Wrapper {
 
     // create page table; called within a transaction, subclasses may override and add aux
     // tables
-    virtual void InitOuterDB(SQLite::Database &db) {
+    virtual void InitOuterDB(const char *zName, SQLite::Database &db) {
         SQLite::Statement check(db, "SELECT * FROM sqlite_master");
         if (check.executeStep()) {
             throw SQLite::Exception("expected empty database in which to create nested VFS",
@@ -1088,11 +1088,13 @@ class VFS : public SQLiteVFS::Wrapper {
         for (const auto &p : ddl) {
             SQLite::Statement(db, p.first + inner_db_tablename_prefix_ + p.second).executeStep();
         }
-        // covering index of interior btree pages
-        SQLite::Statement(db, "CREATE INDEX " + inner_db_tablename_prefix_ +
-                                  "pages_btree_interior ON " + inner_db_tablename_prefix_ +
-                                  "pages (pageno,data,meta1,meta2) WHERE btree_interior")
-            .executeStep();
+        if (!sqlite3_uri_boolean(zName, "no_btree_interior_index", 0)) {
+            // covering index of interior btree pages
+            SQLite::Statement(db, "CREATE INDEX " + inner_db_tablename_prefix_ +
+                                      "pages_btree_interior ON " + inner_db_tablename_prefix_ +
+                                      "pages (pageno,data,meta1,meta2) WHERE btree_interior")
+                .executeStep();
+        }
     }
 
     virtual std::unique_ptr<SQLiteVFS::File>
@@ -1175,7 +1177,7 @@ class VFS : public SQLiteVFS::Wrapper {
                         // page_size directive must precede auto_vacuum in order to be effective
                         outer_db->exec("PRAGMA auto_vacuum=INCREMENTAL");
                         SQLite::Transaction txn(*outer_db);
-                        InitOuterDB(*outer_db);
+                        InitOuterDB(zName, *outer_db);
                         txn.commit();
                     }
 
