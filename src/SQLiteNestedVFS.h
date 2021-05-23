@@ -206,6 +206,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
         // reset the outer database cursor; should be done when it otherwise might go stale.
         virtual void ResetCursor() {
+            src = nullptr;
+            src_size = 0;
             if (cursor_pageno > 0) {
                 cursor.reset();
                 cursor_pageno = 0;
@@ -241,17 +243,22 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 }
                 cursor_pageno = pageno;
             }
-            SQLite::Column data = cursor.getColumn(1);
+            auto data = cursor.getColumn(1);
             assert(data.getName() == std::string("data"));
             src = data.getBlob();
             src_size = data.getBytes();
             if (src_size && (!src || !data.isBlob())) {
                 throw SQLite::Exception("corrupt page " + std::to_string(pageno), SQLITE_CORRUPT);
             }
+            FinishSeek();
 #ifndef NDEBUG
             t_seek += std::chrono::high_resolution_clock::now() - t0;
 #endif
         }
+
+        // Override to add additional logic after seeking cursor (still under the seek lock), such
+        // as reading the meta columns.
+        virtual void FinishSeek() {}
 
         // Decode one page from the blob stored in the outer db. Override me!
         // May parallelize with other jobs.
@@ -702,7 +709,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                     // into a special row with pageno = -100.
                     upsert->reset();
                     upsert->bindNoCopy(1, job->encoded_page,
-                                    std::min(job->encoded_page_size, size_t(100)));
+                                       std::min(job->encoded_page_size, size_t(100)));
                     // keep meta1 & meta2 bindings, if any
                     upsert->bind(4, (sqlite_int64)-100);
                     if (upsert->exec() != 1) {
@@ -1035,10 +1042,11 @@ class VFS : public SQLiteVFS::Wrapper {
         if (zName && zName[0]) {
             std::string sName(zName);
             if (flags & SQLITE_OPEN_MAIN_DB) {
-                // strip inner_db_filename_suffix_ to get filename of outer database
                 std::string outer_db_filename = sName;
                 bool web = sName == "/__web__";
                 if (!web) {
+                    // strip inner_db_filename_suffix_ to get filename of outer database (see
+                    // FullPathname below)
                     if (sName.size() > inner_db_filename_suffix_.size()) {
                         outer_db_filename =
                             sName.substr(0, sName.size() - inner_db_filename_suffix_.size());
@@ -1057,6 +1065,7 @@ class VFS : public SQLiteVFS::Wrapper {
                 std::string outer_db_uri = "file:" + urlencode(outer_db_filename, true);
                 bool unsafe = sqlite3_uri_boolean(zName, "outer_unsafe", 0);
                 if (web) {
+                    // use sqlite_web_vfs, passing through configuration
                     outer_db_uri += "?immutable=1";
                     for (const char *passthrough : {"web_log", "web_insecure", "web_url"}) {
                         if (sqlite3_uri_parameter(zName, passthrough)) {
@@ -1154,10 +1163,12 @@ class VFS : public SQLiteVFS::Wrapper {
 
     // Given user-provided db filename, use it as the outer db on the host filesystem, and
     // append a suffix as the inner db's filename (which won't actually exist on the host
-    // filesystem, but xOpen() will recognize).
+    // filesystem, but xOpen() will recognize). This ensures the inner & outer journals will have
+    // distinct filenames.
     int FullPathname(const char *zName, int nPathOut, char *zPathOut) override {
         std::string zName2(zName);
         if (zName2 == "/__web__") {
+            // unnecessary for read-only web access
             strncpy(zPathOut, zName, nPathOut);
             return SQLITE_OK;
         }
