@@ -264,28 +264,29 @@ def test_sam(tmpdir):
     con = sqlite3.connect(f"file:{zstd_sqlite}?mode=ro", uri=True)
     assert next(con.execute("PRAGMA page_size"))[0] == outer_page_size
     assert next(con.execute("PRAGMA application_id"))[0] == 0x7A737464
-    btree_interior_pages_expected = set(
+    btree_interior_pages_heuristic = set(
         con.execute(
             "select pageno from nested_vfs_zstd_pages indexed by nested_vfs_zstd_pages_btree_interior where btree_interior"
         )
     )
-    assert 10 < len(btree_interior_pages_expected) < 100
+    assert 10 < len(btree_interior_pages_heuristic) < 100
 
     # verify inner page size
     con.enable_load_extension(True)
     con.load_extension(os.path.join(BUILD, "zstd_vfs"))
     con = sqlite3.connect(f"file:{zstd_sqlite}?mode=ro&vfs=zstd", uri=True)
     assert next(con.execute("PRAGMA page_size"))[0] == page_size
+
+    # verify btree interior page index
     try:
         btree_interior_pages_actual = set(
             con.execute("select pageno from dbstat where pagetype='internal'")
         )
-        assert 10 < len(btree_interior_pages_actual) < 100
-        assert not (
-            btree_interior_pages_actual - btree_interior_pages_expected
-        )  # this is a subset because expected includes dead pages
     except sqlite3.OperationalError as exn:
         assert "no such table: dbstat" in str(exn)  # tolerate absence from system build
+    # this won't necessarily hold for all databases (heuristic admits false-positives), but it does
+    # for this one:
+    assert btree_interior_pages_heuristic == btree_interior_pages_actual
 
     if expected_posflag:
         con.execute("PRAGMA threads=8")

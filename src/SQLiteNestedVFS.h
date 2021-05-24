@@ -734,9 +734,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             if (btree_interior_index_.empty()) {
                 upsert->bind(4, job->pageno);
             } else {
-                // set flag if this is an interior b-tree page, as detailed:
-                //   https://www.sqlite.org/fileformat.html
-                upsert->bind(4, job->pageno > 1 && (job->page[0] == 2 || job->page[0] == 5));
+                upsert->bind(4, is_btree_interior(job->page));
                 upsert->bind(5, job->pageno);
             }
 
@@ -773,6 +771,60 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 upsert_errmsg_ = errmsg;
             }
         }
+    }
+
+    // Helper: determine if page should be marked as a btree interior page, thus included in the
+    // special index thereof. We cannot determine this perfectly by looking only at the page blob,
+    // but we can apply several validity tests to minimize false positives (which bloat the index
+    // but aren't a correctness issue).
+    // ref: https://www.sqlite.org/fileformat.html
+    bool is_btree_interior(const std::string &page) {
+        if (page.size() != page_size_ || (page[0] != 2 && page[0] != 5)) {
+            return false;
+        }
+        uint8_t fragmented_free_bytes = page[7];
+        // at most 60 fragmented free bytes
+        if (fragmented_free_bytes > 60) {
+            return false;
+        }
+#define BE16AT(ofs) ((uint16_t(uint8_t(page[(ofs)])) << 8) + uint8_t(page[(ofs) + 1]))
+        // cell count must be less than pagesz/5, 5 being the smallest possible u32 + varint.
+        uint16_t cell_count = BE16AT(3);
+        if (cell_count >= page.size() / 5) {
+            return false;
+        }
+        uint32_t content_offset = BE16AT(5);
+        if (content_offset == 0) {
+            content_offset = 65536;
+        }
+        if (cell_count) {
+            // content area must fit the cells
+            if (content_offset > page.size() - 5 * cell_count) {
+                return false;
+            }
+
+            // first cell pointer must be >= content_offset
+            uint16_t cell1p = BE16AT(12);
+            if (cell1p < content_offset || cell1p > page.size() - 5) {
+                return false;
+            }
+
+            // second cell pointer (if any) must be >= content_offset and differ from the first one
+            // by at least 5
+            if (cell_count > 1) {
+                uint16_t cell2p = BE16AT(14);
+                uint16_t cell2ofs = cell1p >= cell2p ? cell1p - cell2p : cell2p - cell1p;
+                if (cell2p < content_offset || cell2p > page.size() - 5 || cell2ofs < 5) {
+                    return false;
+                }
+            }
+        } else if (content_offset + 256 < page.size() || BE16AT(1) || fragmented_free_bytes) {
+            // with no cells, content_offset must point to the end of the page (minus possible
+            // reserved space), and we cannot have freeblocks
+            return false;
+        }
+#undef BE16AT
+        return true;
     }
 
     // wait for background upserts to complete + raise any error message
