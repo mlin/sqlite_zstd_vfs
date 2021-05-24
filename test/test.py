@@ -285,9 +285,10 @@ def test_sam(tmpdir):
         )
     except sqlite3.OperationalError as exn:
         assert "no such table: dbstat" in str(exn)  # tolerate absence from system build
-    # this won't necessarily hold for all databases (heuristic admits false-positives), but it does
-    # for this one:
-    assert btree_interior_pages_heuristic == btree_interior_pages_actual
+    btree_interior_false_negatives = btree_interior_pages_actual - btree_interior_pages_heuristic
+    assert not btree_interior_false_negatives
+    btree_interior_false_positives = btree_interior_pages_heuristic - btree_interior_pages_actual
+    assert len(btree_interior_false_positives) < 10
 
     if expected_posflag:
         con.execute("PRAGMA threads=8")
