@@ -278,6 +278,7 @@ def test_sam(tmpdir):
     assert next(con.execute("PRAGMA page_size"))[0] == page_size
 
     # verify btree interior page index
+    btree_interior_pages_actual = None
     try:
         btree_interior_pages_actual = set(
             con.execute("select pageno from dbstat where pagetype='internal'")

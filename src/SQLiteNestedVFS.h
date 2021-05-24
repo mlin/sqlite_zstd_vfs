@@ -775,8 +775,10 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
     // Helper: determine if page should be marked as a btree interior page, thus included in the
     // special index thereof. We cannot determine this perfectly by looking only at the page blob,
-    // but we can apply several validity tests to minimize false positives (which bloat the index
-    // but aren't a correctness issue).
+    // as other overflow/freelist/ptrmap pages may contain effectively arbitrary content. But we
+    // can apply a battery of tests that values at specific locations seem consistent with how
+    // SQLite organizes btree pages. False positives bloat the index, but don't cause any
+    // correctness issue.
     // ref: https://www.sqlite.org/fileformat.html
     bool is_btree_interior(const std::string &page) {
         if (page.size() != page_size_ || (page[0] != 2 && page[0] != 5)) {
