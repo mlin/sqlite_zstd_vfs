@@ -122,12 +122,11 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
         }
 
         // After superclass seeks to a page, make sure we have the necessary decompression
-        // dictionary ready for use. This has to be done in this serialized method since it may
-        // need to load it from the outer db.
-        void LoadMeta(SQLite::Statement &sought_cursor) override {
+        // dictionary ready for use.
+        void FinishSeek(SQLite::Statement &sought_cursor) override {
             ddict = nullptr;
             plain = false;
-            SQLite::Column meta1 = sought_cursor.getColumn(2);
+            auto meta1 = sought_cursor.getColumn(2);
             assert(std::string(meta1.getName()) == "meta1");
             if (meta1.isNull()) {
                 plain = true;

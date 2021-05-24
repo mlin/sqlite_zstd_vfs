@@ -226,8 +226,10 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         virtual void ResetCursor() {
             src = nullptr;
             src_size = 0;
-            cursor.reset();
-            cursor_pageno = 0;
+            if (cursor_pageno > 0) {
+                cursor.reset();
+                cursor_pageno = 0;
+            }
             last_op = 0;
         }
 
@@ -276,21 +278,22 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             }
             SQLite::Statement &sought_cursor = btree_interior ? *btree_interior_cursor : cursor;
             assert(sought_cursor.getColumn(0).getInt64() == pageno);
-            SQLite::Column data = sought_cursor.getColumn(1);
+            auto data = sought_cursor.getColumn(1);
             assert(data.getName() == std::string("data"));
             src = data.getBlob();
             src_size = data.getBytes();
             if (src_size && (!src || !data.isBlob())) {
                 throw SQLite::Exception("corrupt page " + std::to_string(pageno), SQLITE_CORRUPT);
             }
-            LoadMeta(sought_cursor);
+            FinishSeek(sought_cursor);
 #ifndef NDEBUG
             t_seek += std::chrono::high_resolution_clock::now() - t0;
 #endif
         }
 
-        // At seek completion, process meta values as needed to prepare for decoding. Override me!
-        virtual void LoadMeta(SQLite::Statement &sought_cursor) {}
+        // Override to add additional logic after seeking cursor (still under the seek lock), such
+        // as reading the meta columns.
+        virtual void FinishSeek(SQLite::Statement &sought_cursor) {}
 
         // Decode one page from the blob stored in the outer db. Override me!
         // May parallelize with other jobs.
@@ -1108,11 +1111,11 @@ class VFS : public SQLiteVFS::Wrapper {
         if (zName && zName[0]) {
             std::string sName(zName);
             if (flags & SQLITE_OPEN_MAIN_DB) {
-                // strip inner_db_filename_suffix_ to get filename of outer database (see
-                // FullPathname below)
                 std::string outer_db_filename = sName;
                 bool web = sName == "/__web__";
                 if (!web) {
+                    // strip inner_db_filename_suffix_ to get filename of outer database (see
+                    // FullPathname below)
                     if (sName.size() > inner_db_filename_suffix_.size()) {
                         outer_db_filename =
                             sName.substr(0, sName.size() - inner_db_filename_suffix_.size());
@@ -1229,7 +1232,8 @@ class VFS : public SQLiteVFS::Wrapper {
 
     // Given user-provided db filename, use it as the outer db on the host filesystem, and
     // append a suffix as the inner db's filename (which won't actually exist on the host
-    // filesystem, but xOpen() will recognize). This prevents name collisions between the journals.
+    // filesystem, but xOpen() will recognize). This ensures the inner & outer journals will have
+    // distinct filenames.
     int FullPathname(const char *zName, int nPathOut, char *zPathOut) override {
         std::string zName2(zName);
         if (zName2 == "/__web__") {
