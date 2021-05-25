@@ -76,41 +76,47 @@ def main():
     )
     args = parser.parse_args(sys.argv[1:])
 
+    valid_page_KiB = [1, 2, 4, 8, 16, 32, 64]
+    assert args.inner_page_KiB in valid_page_KiB
+    assert args.outer_page_KiB in valid_page_KiB
+
     ans = run(args.cache_MiB, args.level, args.threads, args.inner_page_KiB, args.outer_page_KiB)
     print(json.dumps(ans, indent=2))
 
 
 def run(cache_MiB, level, threads, inner_page_KiB, outer_page_KiB):
+    tmpdir = os.environ.get("TMPDIR", "/tmp")
+
     # download db to /tmp/TPC-H.db; --continue=true avoids re-download
     subprocess.run(
         f"aria2c -x 10 -j 10 -s 10 --file-allocation=none --continue=true {DB_URL} >&2",
         check=True,
         shell=True,
-        cwd="/tmp",
+        cwd=tmpdir,
     )
 
     # VACUUM INTO a fresh (uncompressed) copy
     timings = {}
     try:
-        os.unlink("/tmp/TPC-H.vacuum.db")
+        os.unlink(os.path.join(tmpdir, "TPC-H.vacuum.db"))
     except FileNotFoundError:
         pass
-    subprocess.run("cat /tmp/TPC-H.db > /dev/null", check=True, shell=True)
-    con = sqlite3.connect(f"file:/tmp/TPC-H.db?mode=ro", uri=True)
+    subprocess.run(f"cat {os.path.join(tmpdir, 'TPC-H.db')} > /dev/null", check=True, shell=True)
+    con = sqlite3.connect(f"file:{os.path.join(tmpdir, 'TPC-H.db')}?mode=ro", uri=True)
     with timer(timings, "load"):
         con.execute(f"PRAGMA page_size={1024*inner_page_KiB}")
-        con.execute("VACUUM INTO '/tmp/TPC-H.vacuum.db'")
+        con.execute(f"VACUUM INTO '{os.path.join(tmpdir, 'TPC-H.vacuum.db')}'")
         con.close()
 
     # run each query twice, with a fresh db connection, and measure the second run; so it should
     # have a hot filesystem cache and cold db page cache.
     expected_results = {}
     for query_name, query_sql in queries.items():
-        con = sqlite3.connect(f"file:/tmp/TPC-H.vacuum.db?mode=ro", uri=True)
+        con = sqlite3.connect(f"file:{os.path.join(tmpdir, 'TPC-H.vacuum.db')}?mode=ro", uri=True)
         expected_results[query_name] = list(con.execute(query_sql))
         con.close()
 
-        con = sqlite3.connect(f"file:/tmp/TPC-H.vacuum.db?mode=ro", uri=True)
+        con = sqlite3.connect(f"file:{os.path.join(tmpdir, 'TPC-H.vacuum.db')}?mode=ro", uri=True)
         if cache_MiB:
             con.execute(f"PRAGMA cache_size={-1024*cache_MiB}")
         with timer(timings, query_name):
@@ -120,36 +126,40 @@ def run(cache_MiB, level, threads, inner_page_KiB, outer_page_KiB):
 
     # create zstd-compressed db using VACUUM INTO
     try:
-        os.unlink("/tmp/TPC-H.zstd.db")
+        os.unlink(os.path.join(tmpdir, "TPC-H.zstd.db"))
     except FileNotFoundError:
         pass
-    con = sqlite3.connect(f"file:/tmp/TPC-H.vacuum.db?mode=ro", uri=True)
+    con = sqlite3.connect(f"file:{os.path.join(tmpdir, 'TPC-H.vacuum.db')}?mode=ro", uri=True)
     con.enable_load_extension(True)
     con.load_extension(os.path.join(BUILD, "zstd_vfs"))
     with timer(timings, "load_zstd"):
         con.execute(f"PRAGMA page_size={1024*inner_page_KiB}")
         con.execute(
-            f"VACUUM INTO 'file:/tmp/TPC-H.zstd.db?vfs=zstd&outer_unsafe=true&outer_page_size={1024*outer_page_KiB}&level={level}&threads={threads}'"
+            f"VACUUM INTO 'file:{os.path.join(tmpdir, 'TPC-H.zstd.db')}?vfs=zstd&outer_unsafe=true&outer_page_size={1024*outer_page_KiB}&level={level}&threads={threads}'"
         )
         con.close()
-    timings["db_size"] = os.path.getsize("/tmp/TPC-H.vacuum.db")
-    timings["zstd_db_size"] = os.path.getsize("/tmp/TPC-H.zstd.db")
+    timings["db_size"] = os.path.getsize(os.path.join(tmpdir, "TPC-H.vacuum.db"))
+    timings["zstd_db_size"] = os.path.getsize(os.path.join(tmpdir, "TPC-H.zstd.db"))
 
     # repeat queries on compressed db
     for query_name, query_sql in queries.items():
-        con = connect_zstd("/tmp/TPC-H.zstd.db", cache_MiB=cache_MiB, threads=threads)
+        con = connect_zstd(
+            os.path.join(tmpdir, "TPC-H.zstd.db"), cache_MiB=cache_MiB, threads=threads
+        )
         results = list(con.execute(query_sql))
         con.close()
         assert results == expected_results[query_name]
 
-        con = connect_zstd("/tmp/TPC-H.zstd.db", cache_MiB=cache_MiB, threads=threads)
+        con = connect_zstd(
+            os.path.join(tmpdir, "TPC-H.zstd.db"), cache_MiB=cache_MiB, threads=threads
+        )
         with timer(timings, "zstd_" + query_name):
             results = list(con.execute(query_sql))
         con.close()
         assert results == expected_results[query_name]
 
     # verify outer application_id
-    outer = sqlite3.connect("/tmp/TPC-H.zstd.db")
+    outer = sqlite3.connect(os.path.join(tmpdir, "TPC-H.zstd.db"))
     assert next(outer.execute("PRAGMA application_id"))[0] == 0x7A737464
 
     return timings
