@@ -11,7 +11,7 @@ import json
 HERE = os.path.dirname(__file__)
 BUILD = os.path.abspath(os.path.join(HERE, "..", "build"))
 
-DB_URL = "https://github.com/lovasoa/TPCH-sqlite/releases/download/v1.0/TPC-H.db"
+DB_URL = "https://github.com/mlin/sqlite_web_vfs/releases/download/test-db-v1/TPC-H.db"
 queries = {}
 queries[
     "Q1"
