@@ -17,7 +17,7 @@ Standalone instructions follow.
 Prerequisites:
 
 * C++11 compiler, CMake >= 3.11
-* *Up-to-date* packages for SQLite3 and Zstandard development, e.g. Ubuntu 20.04 `sqlite3 libsqlite3-dev libzstd-dev`
+* *Up-to-date* packages for SQLite3, Zstandard, and libcurl development, e.g. Ubuntu 20.04 `sqlite3 libsqlite3-dev libzstd-dev libcurl4-openssl-dev`
 
 Fetch source code and compile the [SQLite loadable extension](https://www.sqlite.org/loadext.html):
 

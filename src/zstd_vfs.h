@@ -123,10 +123,10 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
 
         // After superclass seeks to a page, make sure we have the necessary decompression
         // dictionary ready for use.
-        void FinishSeek() override {
+        void FinishSeek(SQLite::Statement &sought_cursor) override {
             ddict = nullptr;
             plain = false;
-            auto meta1 = cursor.getColumn(2);
+            auto meta1 = sought_cursor.getColumn(2);
             assert(std::string(meta1.getName()) == "meta1");
             if (meta1.isNull()) {
                 plain = true;
@@ -362,8 +362,8 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
 
 class ZstdVFS : public SQLiteNested::VFS {
   protected:
-    void InitOuterDB(SQLite::Database &db) override {
-        SQLiteNested::VFS::InitOuterDB(db);
+    void InitOuterDB(const char *zName, SQLite::Database &db) override {
+        SQLiteNested::VFS::InitOuterDB(zName, db);
         std::vector<const char *> ddl = {
             "CREATE TABLE nested_vfs_zstd_dicts (id INTEGER PRIMARY KEY AUTOINCREMENT, dict BLOB "
             "NOT NULL, page_count INTEGER NOT NULL)",

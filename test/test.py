@@ -184,9 +184,9 @@ def test_vacuum(tmpdir, chinook_file):
 def test_sam(tmpdir):
     (region, expected_posflag) = ("chr21:20000000-25000000", 27074190881221)
     # (region, expected_posflag) = ("chr21:20000000-40000000", 148853599470365)
-    page_size = 65536
-    outer_page_size = 1024
-    level = 8
+    page_size = 16384
+    outer_page_size = 65536
+    level = 9
     subprocess.run(
         f"samtools view -O BAM -@ 4 -o {region}.bam https://s3.amazonaws.com/1000genomes/1000G_2504_high_coverage/data/ERR3239334/NA12878.final.cram {region}",
         check=True,
@@ -264,12 +264,29 @@ def test_sam(tmpdir):
     con = sqlite3.connect(f"file:{zstd_sqlite}?mode=ro", uri=True)
     assert next(con.execute("PRAGMA page_size"))[0] == outer_page_size
     assert next(con.execute("PRAGMA application_id"))[0] == 0x7A737464
+    btree_interior_pages_heuristic = set(
+        con.execute(
+            "select pageno from nested_vfs_zstd_pages indexed by nested_vfs_zstd_pages_btree_interior where btree_interior"
+        )
+    )
+    assert 10 < len(btree_interior_pages_heuristic) < 100
 
     # verify inner page size
     con.enable_load_extension(True)
     con.load_extension(os.path.join(BUILD, "zstd_vfs"))
     con = sqlite3.connect(f"file:{zstd_sqlite}?mode=ro&vfs=zstd", uri=True)
     assert next(con.execute("PRAGMA page_size"))[0] == page_size
+
+    # verify btree interior page index
+    try:
+        btree_interior_pages_actual = set(
+            con.execute("select pageno from dbstat where pagetype='internal'")
+        )
+        # this won't necessarily hold for all databases, as the heuristic admits false positives;
+        # but it does for this one:
+        assert btree_interior_pages_heuristic == btree_interior_pages_actual
+    except sqlite3.OperationalError as exn:
+        assert "no such table: dbstat" in str(exn)  # tolerate absence from system build
 
     if expected_posflag:
         con.execute("PRAGMA threads=8")
@@ -315,7 +332,7 @@ def test_web():
     # compressed db served from GitHub Releases. if we change the db schema then we'll need to
     # update accordingly (with a version generated locally by TPC-H.py)
     DB_URL = (
-        "https://github.com/mlin/sqlite_zstd_vfs/releases/download/web-test-db-v1/TPC-H.zstd.db"
+        "https://github.com/mlin/sqlite_zstd_vfs/releases/download/web-test-db-v2/TPC-H.zstd.db"
     )
     con = sqlite3.connect(f":memory:")
     con.enable_load_extension(True)
