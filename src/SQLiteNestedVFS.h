@@ -1194,7 +1194,8 @@ class VFS : public SQLiteVFS::Wrapper {
                 if (web) {
                     // use sqlite_web_vfs, passing through configuration
                     outer_db_uri += "?immutable=1";
-                    for (const char *passthrough : {"web_log", "web_insecure", "web_url"}) {
+                    for (const char *passthrough :
+                         {"web_log", "web_insecure", "web_url", "web_dbi_url", "web_nodbi"}) {
                         if (sqlite3_uri_parameter(zName, passthrough)) {
                             outer_db_uri += std::string("&") + passthrough + std::string("=") +
                                             urlencode(sqlite3_uri_parameter(zName, passthrough));
