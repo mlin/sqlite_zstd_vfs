@@ -63,7 +63,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
     std::unique_ptr<SQLite::Database> outer_db_;
     std::string inner_db_pages_table_;
-    bool read_only_;
+    bool read_only_, web_;
 
     std::string btree_interior_index_;
 
@@ -194,10 +194,12 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         FetchJob(InnerDatabaseFile &that)
             : cursor(*(that.outer_db_), "SELECT pageno, data, meta1, meta2 FROM " +
                                             that.inner_db_pages_table_ +
-                                            " WHERE pageno >= ? ORDER BY pageno"),
+                                            " NOT INDEXED WHERE pageno >= ? ORDER BY pageno"),
               page_size(that.page_size_) {
             PutState(State::NEW);
-            if (!that.btree_interior_index_.empty()) {
+            // prepare to read from btree interior index in web mode only. it can be
+            // counterproductive locally due to its big index keys => low fan-out
+            if (that.web_ && !that.btree_interior_index_.empty()) {
                 btree_interior_cursor.reset(new SQLite::Statement(
                     *(that.outer_db_), "SELECT pageno, data, meta1, meta2 FROM " +
                                            that.inner_db_pages_table_ + " INDEXED BY " +
@@ -248,6 +250,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 #ifndef NDEBUG
                     non_sequential++;
 #endif
+
                     // first try the covering index of interior btree pages
                     if (btree_interior_cursor &&
                         (btree_interior_cursor->reset(), btree_interior_cursor->bind(1, pageno),
@@ -259,6 +262,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                     } else {
                         // otherwise seek the main cursor
                         ResetCursor();
+
                         cursor.bind(1, pageno);
                     }
                 } else {
@@ -1071,6 +1075,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                       bool noprefetch, bool web)
         : outer_db_(std::move(outer_db)),
           inner_db_pages_table_(inner_db_tablename_prefix + "pages"), read_only_(read_only),
+          web_(web),
           // MAX(pageno) instead of COUNT(pageno) because the latter would trigger table scan
           select_page_count_(*outer_db_,
                              "SELECT IFNULL(MAX(pageno), 0) FROM " + inner_db_pages_table_),
@@ -1149,7 +1154,7 @@ class VFS : public SQLiteVFS::Wrapper {
         for (const auto &p : ddl) {
             SQLite::Statement(db, p.first + inner_db_tablename_prefix_ + p.second).executeStep();
         }
-        if (!sqlite3_uri_boolean(zName, "no_btree_interior_index", 0)) {
+        if (!sqlite3_uri_boolean(zName, "web_nodbi", 0)) {
             // covering index of interior btree pages
             SQLite::Statement(db, "CREATE INDEX " + inner_db_tablename_prefix_ +
                                       "pages_btree_interior ON " + inner_db_tablename_prefix_ +
