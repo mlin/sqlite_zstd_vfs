@@ -177,7 +177,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         std::vector<char> decodebuf; // otherwise decode into this buffer (background fetch)
 
         SQLite::Statement cursor; // outer db cursor
-        std::unique_ptr<SQLite::Statement> btree_interior_cursor;
+        std::unique_ptr<SQLite::Statement> btree_interior_cursor, btree_interior_pageno_cursor;
         sqlite3_int64 cursor_pageno = 0; // if >0 then cursor is currently on this page
         unsigned long long last_op = 0;  // "time" of the cursor's last use
         bool was_sequential = false;
@@ -199,12 +199,16 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             PutState(State::NEW);
             // prepare to read from btree interior index in web mode only. it can be
             // counterproductive locally due to its big index keys => low fan-out
-            if (that.web_ && !that.btree_interior_index_.empty()) {
+            if (!that.btree_interior_index_.empty()) {
                 btree_interior_cursor.reset(new SQLite::Statement(
                     *(that.outer_db_), "SELECT pageno, data, meta1, meta2 FROM " +
                                            that.inner_db_pages_table_ + " INDEXED BY " +
                                            that.btree_interior_index_ +
                                            " WHERE btree_interior AND pageno = ?"));
+                btree_interior_pageno_cursor.reset(new SQLite::Statement(
+                    *(that.outer_db_), "SELECT 1 FROM " + that.inner_db_pages_table_ +
+                                           " INDEXED BY " + that.btree_interior_index_ +
+                                           "_pageno WHERE btree_interior AND pageno = ?"));
             }
         }
 
@@ -251,10 +255,23 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                     non_sequential++;
 #endif
 
-                    // first try the covering index of interior btree pages
-                    if (btree_interior_cursor &&
-                        (btree_interior_cursor->reset(), btree_interior_cursor->bind(1, pageno),
-                         btree_interior_cursor->executeStep())) {
+                    // First try the index of interior btree pages. The covering index is somewhat
+                    // costly to search due to its large btree keys (=> low fan-out). Therefore, we
+                    // first search the pageno-only index so that we can skip the costlier lookup
+                    // in the common case that it'd fail anyway (like a bloom filter, but exact).
+                    if (btree_interior_pageno_cursor &&
+                        (btree_interior_pageno_cursor->reset(),
+                         btree_interior_pageno_cursor->bind(1, pageno),
+                         btree_interior_pageno_cursor->executeStep())) {
+                        assert(btree_interior_cursor);
+                        btree_interior_cursor->reset();
+                        btree_interior_cursor->bind(1, pageno);
+                        if (!btree_interior_cursor->executeStep()) {
+                            // impossible
+                            throw SQLite::Exception("inconsistent btree interior index, page " +
+                                                        std::to_string(pageno),
+                                                    SQLITE_CORRUPT);
+                        }
                         btree_interior = true;
 #ifndef NDEBUG
                         interior_hits++;
@@ -1093,7 +1110,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         if (outer_db_
                 ->execAndGet(
                     "SELECT count(1) FROM sqlite_master WHERE type = 'index' AND name = '" +
-                    btree_interior_index_ + "'")
+                    btree_interior_index_ + "_pageno'")
                 .getInt() != 1) {
             btree_interior_index_.clear();
         }
@@ -1159,6 +1176,15 @@ class VFS : public SQLiteVFS::Wrapper {
             SQLite::Statement(db, "CREATE INDEX " + inner_db_tablename_prefix_ +
                                       "pages_btree_interior ON " + inner_db_tablename_prefix_ +
                                       "pages (pageno,data,meta1,meta2) WHERE btree_interior")
+                .executeStep();
+            // redundant second index with only the page numbers. the covering index is somewhat
+            // costly to search due to its large keys => low fan-out. therefore, we first search
+            // the pageno-only index so that we can skip the costlier lookup in the common case
+            // that it'd fail anyway (like a bloom filter, but exact).
+            SQLite::Statement(db, "CREATE INDEX " + inner_db_tablename_prefix_ +
+                                      "pages_btree_interior_pageno ON " +
+                                      inner_db_tablename_prefix_ +
+                                      "pages (pageno) WHERE btree_interior")
                 .executeStep();
         }
     }
