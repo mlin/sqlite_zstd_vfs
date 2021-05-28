@@ -445,7 +445,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             if (active_jobs + 2 <= fetch_thread_pool_.MaxThreads()) {
                 job->pageno = pageno_hint;
                 job->PutState(FetchJob::State::QUEUE);
-                fetch_thread_pool_.EnqueueFast(
+                fetch_thread_pool_.Enqueue(
                     job, [this](void *job) { return this->BackgroundFetchJob(job); }, nullptr);
             } else {
                 assert(active_jobs + 1 == fetch_thread_pool_.MaxThreads());
