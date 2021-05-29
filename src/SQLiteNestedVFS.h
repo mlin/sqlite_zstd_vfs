@@ -296,7 +296,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
     const size_t MAX_FETCH_CURSORS = 4;
     std::vector<std::unique_ptr<FetchJob>> fetch_jobs_;
-    ThreadPoolWithEnqueueFast fetch_thread_pool_;
+    ThreadPool fetch_thread_pool_;
     std::mutex seek_lock_; // serializes outer db interactions among fetch background threads
     std::atomic<bool> seek_interrupt_; // broadcast that main thread wants seek_lock_
 
@@ -1051,7 +1051,7 @@ class VFS : public SQLiteVFS::Wrapper {
                     }
                 }
 
-                std::string vfs = outer_vfs_;
+                const char *vfs = "";
                 std::string outer_db_uri = "file:" + urlencode(outer_db_filename, true);
                 bool unsafe = sqlite3_uri_boolean(zName, "outer_unsafe", 0);
                 if (web) {
