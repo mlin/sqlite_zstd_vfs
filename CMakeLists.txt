@@ -15,13 +15,12 @@ if(${CMAKE_VERSION} VERSION_LESS 3.14)
     endmacro()
 endif()
 
-set(SQLITECPP_IN_EXTENSION ON CACHE INTERNAL "")
 set(SQLITECPP_INTERNAL_SQLITE OFF CACHE INTERNAL "")
 set(SQLITE_ENABLE_COLUMN_METADATA OFF CACHE INTERNAL "")
 FetchContent_Declare(
     sqlitecpp
     GIT_REPOSITORY  https://github.com/mlin/SQLiteCpp.git
-    GIT_TAG         49a568f15d025ddcd61d54c437a4c5ef773d2389
+    GIT_TAG         3.1.1
 )
 FetchContent_MakeAvailable(sqlitecpp)
 include_directories(${sqlitecpp_SOURCE_DIR}/include)
