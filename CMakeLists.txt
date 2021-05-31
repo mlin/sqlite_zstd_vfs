@@ -21,7 +21,7 @@ set(SQLITE_ENABLE_COLUMN_METADATA OFF CACHE INTERNAL "")
 FetchContent_Declare(
     sqlitecpp
     GIT_REPOSITORY  https://github.com/mlin/SQLiteCpp.git
-    GIT_TAG         49a568f15d025ddcd61d54c437a4c5ef773d2389
+    GIT_TAG         6d089fc
 )
 FetchContent_MakeAvailable(sqlitecpp)
 include_directories(${sqlitecpp_SOURCE_DIR}/include)
