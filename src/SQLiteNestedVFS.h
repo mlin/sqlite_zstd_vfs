@@ -1146,7 +1146,7 @@ class VFS : public SQLiteVFS::Wrapper {
     // subclass may override inner_db_tablename_prefix_ with something encoding-specific, to
     // prevent confusion between different nested VFS encodings
     std::string inner_db_tablename_prefix_ = "inner_vfs_";
-    std::string inner_db_filename_suffix_ = "-inner", outer_vfs_, last_error_;
+    std::string inner_db_filename_suffix_ = "-inner", last_error_;
 
     size_t szOsFile() override {
         return std::max(SQLiteVFS::Wrapper::szOsFile(), (size_t)wrapped_->szOsFile);
@@ -1219,7 +1219,7 @@ class VFS : public SQLiteVFS::Wrapper {
                     }
                 }
 
-                std::string vfs = outer_vfs_;
+                std::string vfs;
                 std::string outer_db_uri = "file:" + urlencode(outer_db_filename, true);
                 bool unsafe = sqlite3_uri_boolean(zName, "outer_unsafe", 0);
                 if (web) {
