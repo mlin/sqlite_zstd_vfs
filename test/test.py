@@ -91,7 +91,7 @@ def test_roundtrip_zstd(tmpdir, chinook_file):
         universal_newlines=True,
     )
     expected = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
-    assert len(expected) == 15643
+    assert len(expected) == 15632
 
     # open the nested database
     con = sqlite3.connect(f":memory:")
@@ -178,7 +178,7 @@ def test_vacuum(tmpdir, chinook_file):
         universal_newlines=True,
     )
     actual = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
-    assert len(actual) == 15643
+    assert len(actual) == 15632
 
 
 def test_sam(tmpdir):
