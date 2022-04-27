@@ -27,11 +27,12 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <libgen.h>
 #include <memory>
 #include <string>
-#include <unistd.h>
 #include <vector>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #include <iostream>
 #define _EOL std::endl
@@ -1331,6 +1332,7 @@ class VFS : public SQLiteVFS::Wrapper {
             strncpy(zPathOut, zName, nPathOut);
             return SQLITE_OK;
         }
+#ifndef _WIN32
         if (!zName2.empty() && zName2[0] != '/') {
             if (getcwd(zPathOut, nPathOut) && !strcmp(zPathOut, "/")) {
                 // evading bug in sqlite3 os_unix.c unixFullPathname, when given a relative path
@@ -1338,6 +1340,7 @@ class VFS : public SQLiteVFS::Wrapper {
                 zName2 = "/" + zName2;
             }
         }
+#endif
         int rc = SQLiteVFS::Wrapper::FullPathname(zName2.c_str(), nPathOut, zPathOut);
         if (rc != SQLITE_OK && rc != SQLITE_OK_SYMLINK) {
             _DBG << "FullPathName " << rc << " " << sqlite3_errstr(rc) << _EOL;
