@@ -1,6 +1,8 @@
 # sqlite_zstd_vfs
 
-This [SQLite VFS extension](https://www.sqlite.org/vfs.html) provides streaming storage compression with [Zstandard](https://facebook.github.io/zstd/), compressing [pages of the main database file](https://www.sqlite.org/fileformat.html) as they're written out, and later decompressing them as they're read in. It runs page de/compression on background threads and occasionally generates [dictionaries](https://github.com/facebook/zstd#the-case-for-small-data-compression) to improve subsequent compression.
+This [SQLite VFS extension](https://www.sqlite.org/vfs.html) provides streaming storage compression with [Zstandard](https://facebook.github.io/zstd/), transparently compressing [pages of the main database file](https://www.sqlite.org/fileformat.html) as they're written out, and later decompressing them as they're read in. It runs page de/compression on background threads and occasionally generates [dictionaries](https://github.com/facebook/zstd#the-case-for-small-data-compression) to improve subsequent compression.
+
+![illustration](https://mlin.github.io/GenomicSQLite/sqlite_zstd_vfs.png)
 
 Compressed page storage operates similarly to the [design of ZIPVFS](https://sqlite.org/zipvfs/doc/trunk/www/howitworks.wiki), the SQLite developers' proprietary extension. Because we're not as familiar with the internal "pager" module, we use a full-fledged SQLite database as the bottom-most layer. Where SQLite would write database page #P at offset P × page_size in the disk file, instead we `INSERT INTO outer_page_table(rowid,data) VALUES(P,compressed_inner_page)`, and later `SELECT data FROM outer_page_table WHERE rowid=P`. *You mustn't be afraid to dream a little smaller, darling...*
 
