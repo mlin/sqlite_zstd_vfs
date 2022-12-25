@@ -68,6 +68,24 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
     std::string btree_interior_index_;
 
+    // We use this mutex around the outer database in debug mode only, to verify that ops on it are
+    // effectively serialized by our our more-intricate coordination schemes (barriers etc.).
+    std::mutex outer_debug_mutex_;
+    int outer_debug_mutex_holder_ = -1;
+    std::mutex *p_outer_debug_mutex_ = &outer_debug_mutex_;
+    int *p_outer_debug_mutex_holder_ = &outer_debug_mutex_holder_;
+#ifndef NDEBUG
+#define OUTER_DEBUG_LOCK()                                                                         \
+    std::unique_lock<std::mutex> outer_debug_lock_(*p_outer_debug_mutex_, std::try_to_lock);       \
+    if (!outer_debug_lock_.owns_lock()) {                                                          \
+        _DBG << "OUTER DB CONFLICT WITH LINE " << *p_outer_debug_mutex_holder_ << _EOL;            \
+        assert(false);                                                                             \
+    }                                                                                              \
+    *p_outer_debug_mutex_holder_ = __LINE__
+#else
+#define OUTER_DEBUG_LOCK()
+#endif
+
     /**********************************************************************************************
      * Database file geometry
      *********************************************************************************************/
@@ -191,16 +209,20 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         sqlite3_int64 sequential = 0, non_sequential = 0, interior_hits = 0;
         std::chrono::nanoseconds t_seek = std::chrono::nanoseconds::zero(),
                                  t_decode = std::chrono::nanoseconds::zero();
+        std::mutex *p_outer_debug_mutex_;
+        int *p_outer_debug_mutex_holder_;
 
         FetchJob(InnerDatabaseFile &that)
             : cursor(*(that.outer_db_), "SELECT pageno, data, meta1, meta2 FROM " +
                                             that.inner_db_pages_table_ +
                                             " NOT INDEXED WHERE pageno >= ? ORDER BY pageno"),
-              page_size(that.page_size_) {
+              page_size(that.page_size_), p_outer_debug_mutex_(that.p_outer_debug_mutex_),
+              p_outer_debug_mutex_holder_(that.p_outer_debug_mutex_holder_) {
             PutState(State::NEW);
             // prepare to read from btree interior index in web mode only. it can be
             // counterproductive locally due to its big index keys => low fan-out
             if (!that.btree_interior_index_.empty()) {
+                OUTER_DEBUG_LOCK();
                 btree_interior_cursor.reset(new SQLite::Statement(
                     *(that.outer_db_), "SELECT pageno, data, meta1, meta2 FROM " +
                                            that.inner_db_pages_table_ + " INDEXED BY " +
@@ -250,6 +272,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             assert(errmsg.empty() && !src && !src_size);
             bool btree_interior = false;
             if (cursor_pageno != pageno) {
+                OUTER_DEBUG_LOCK();
                 if (!(cursor_pageno && cursor_pageno + 1 == pageno)) {
                     was_sequential = false;
 #ifndef NDEBUG
@@ -298,6 +321,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                     cursor_pageno = pageno;
                 }
             }
+            OUTER_DEBUG_LOCK();
             SQLite::Statement &sought_cursor = btree_interior ? *btree_interior_cursor : cursor;
             assert(sought_cursor.getColumn(0).getInt64() == pageno);
             auto data = sought_cursor.getColumn(1);
@@ -529,6 +553,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         if (!page1plain_ || iOfst + iAmt > 100)
             return false;
         PrefetchBarrier();
+        OUTER_DEBUG_LOCK();
         if (!read_header_) {
             read_header_.reset(new SQLite::Statement(
                 *outer_db_, "SELECT data FROM " + inner_db_pages_table_ + " WHERE pageno = -100"));
@@ -641,6 +666,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     void begin() {
         assert(!read_only_);
         if (!txn_) {
+            OUTER_DEBUG_LOCK();
             txn_.reset(new SQLite::Transaction(*outer_db_));
         }
     }
@@ -798,6 +824,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     // perform upsert operation in worker thread; ThreadPool runs these serially in enqueued
     // order
     void ExecuteUpsert(EncodeJob *pjob) noexcept {
+        OUTER_DEBUG_LOCK();
         std::unique_ptr<EncodeJob> job(pjob);
         assert(job->page.size() == page_size_);
         try {
@@ -880,6 +907,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             }
 
             if (!insert_page_) {
+                OUTER_DEBUG_LOCK();
                 auto sql = "INSERT INTO " + inner_db_pages_table_;
                 if (btree_interior_index_.empty()) {
                     sql += "(data,meta1,meta2,pageno) VALUES(?,?,?,?)";
@@ -889,6 +917,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 insert_page_.reset(new SQLite::Statement(*outer_db_, sql));
             }
             if (!update_page_) {
+                OUTER_DEBUG_LOCK();
                 auto sql = "UPDATE " + inner_db_pages_table_ + " SET data=?, meta1=?, meta2=?";
                 if (btree_interior_index_.empty()) {
                     sql += " WHERE pageno=?";
@@ -927,6 +956,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         try {
             PrefetchBarrier();
             UpsertBarrier();
+            OUTER_DEBUG_LOCK();
             if (!DetectPageSize()) {
                 return size == 0 ? SQLITE_OK : SQLITE_IOERR_TRUNCATE;
             }
@@ -968,6 +998,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         assert(page_count_ == 0 || VerifyPageCount());
         try {
             if (txn_) {
+                OUTER_DEBUG_LOCK();
                 txn_->commit();
                 txn_.reset();
             }

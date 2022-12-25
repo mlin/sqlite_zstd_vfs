@@ -86,6 +86,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
         if (existing != dict_cache_.end()) {
             return existing->second;
         }
+        OUTER_DEBUG_LOCK();
         if (!get_dict_) {
             get_dict_.reset(new SQLite::Statement(
                 *outer_db_, "SELECT dict, page_count FROM nested_vfs_zstd_dicts WHERE id = ?"));
@@ -204,6 +205,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
         if (cur_dict_ < 0) {
             PrefetchBarrier();
             UpsertBarrier();
+            OUTER_DEBUG_LOCK();
             // start off with the newest dict stored in the database, if any
             if (!last_dict_id_) {
                 last_dict_id_.reset(
@@ -248,20 +250,27 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             sqlite_int64 dict_page_count = std::max(cur_dict_pages_written_, page_count_);
 
             // put new dict into the db
-            if (!put_dict_) {
-                put_dict_.reset(new SQLite::Statement(
-                    *outer_db_, "INSERT INTO nested_vfs_zstd_dicts(dict,page_count) VALUES(?,?)"));
-            }
-            StatementResetter put_dict_resetter(*put_dict_);
-            put_dict_->bindNoCopy(1, dict.data(), dict.size());
-            put_dict_->bind(2, dict_page_count);
-            begin();
-            if (put_dict_->exec() != 1) {
-                throw SQLite::Exception("unexpected result from dict insert", SQLITE_IOERR_WRITE);
-            }
-            sqlite_int64 dict_id = outer_db_->getLastInsertRowid();
-            if (dict_id < 0) {
-                throw SQLite::Exception("unexpected rowid from dict insert", SQLITE_IOERR_WRITE);
+            sqlite_int64 dict_id;
+            {
+                OUTER_DEBUG_LOCK();
+                if (!put_dict_) {
+                    put_dict_.reset(new SQLite::Statement(
+                        *outer_db_,
+                        "INSERT INTO nested_vfs_zstd_dicts(dict,page_count) VALUES(?,?)"));
+                }
+                StatementResetter put_dict_resetter(*put_dict_);
+                put_dict_->bindNoCopy(1, dict.data(), dict.size());
+                put_dict_->bind(2, dict_page_count);
+                begin();
+                if (put_dict_->exec() != 1) {
+                    throw SQLite::Exception("unexpected result from dict insert",
+                                            SQLITE_IOERR_WRITE);
+                }
+                dict_id = outer_db_->getLastInsertRowid();
+                if (dict_id < 0) {
+                    throw SQLite::Exception("unexpected rowid from dict insert",
+                                            SQLITE_IOERR_WRITE);
+                }
             }
             EnsureDictCached(dict_id);
 
