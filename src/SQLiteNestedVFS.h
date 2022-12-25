@@ -219,8 +219,6 @@ class InnerDatabaseFile : public SQLiteVFS::File {
               page_size(that.page_size_), p_outer_debug_mutex_(that.p_outer_debug_mutex_),
               p_outer_debug_mutex_holder_(that.p_outer_debug_mutex_holder_) {
             PutState(State::NEW);
-            // prepare to read from btree interior index in web mode only. it can be
-            // counterproductive locally due to its big index keys => low fan-out
             if (!that.btree_interior_index_.empty()) {
                 OUTER_DEBUG_LOCK();
                 btree_interior_cursor.reset(new SQLite::Statement(
@@ -447,6 +445,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             if (!job || (fetch_jobs_.size() < MAX_FETCH_CURSORS &&
                          job->cursor_pageno + 1 != pageno && job->cursor_pageno)) {
                 assert(fetch_jobs_.size() < MAX_FETCH_CURSORS);
+                // acquire seek lock because FetchJob() constructor initializes Statements
+                std::lock_guard<std::mutex> seek_lock(seek_lock_);
                 fetch_jobs_.push_back(NewFetchJob());
                 job = fetch_jobs_.back().get();
             }
