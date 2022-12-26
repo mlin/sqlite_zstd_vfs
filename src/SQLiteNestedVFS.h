@@ -1001,6 +1001,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         assert(page_count_ == 0 || VerifyPageCount());
         try {
             if (txn_) {
+                _DBG << "COMMIT " << outer_db_->getFilename() << _EOL;
                 OUTER_DEBUG_LOCK();
                 txn_->commit();
                 txn_.reset();
