@@ -835,7 +835,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             SQLite::Statement *upsert = job->insert ? insert_page_.get() : update_page_.get();
             assert(upsert);
             upsert->clearBindings();
-            upsert->bindNoCopy(1, job->encoded_page, job->encoded_page_size);
+            upsert->bind(1, job->encoded_page, job->encoded_page_size);
             if (!job->meta1null) {
                 upsert->bind(2, job->meta1);
             }
@@ -859,8 +859,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                     // see ReadPlainPage1() above. When we write page 1, cc its first 100 bytes
                     // into a special row with pageno = -100.
                     upsert->reset();
-                    upsert->bindNoCopy(1, job->encoded_page,
-                                       std::min(job->encoded_page_size, size_t(100)));
+                    upsert->bind(1, job->encoded_page,
+                                 std::min(job->encoded_page_size, size_t(100)));
                     // keep meta1 & meta2 bindings, if any
                     upsert->bind(btree_interior_index_.empty() ? 4 : 5, (sqlite_int64)-100);
                     if (upsert->exec() != 1) {
