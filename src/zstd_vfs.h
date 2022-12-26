@@ -256,7 +256,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
                     *outer_db_, "INSERT INTO nested_vfs_zstd_dicts(dict,page_count) VALUES(?,?)"));
             }
             StatementResetter put_dict_resetter(*put_dict_);
-            put_dict_->bindNoCopy(1, dict.data(), dict.size());
+            put_dict_->bind(1, dict.data(), dict.size());
             put_dict_->bind(2, dict_page_count);
             begin();
             if (put_dict_->exec() != 1) {
