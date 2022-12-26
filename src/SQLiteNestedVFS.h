@@ -687,6 +687,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         bool btree_interior = false;
 
         std::string errmsg;
+        int stage;
 
         virtual ~EncodeJob() = default;
         virtual void Execute() noexcept {
@@ -773,6 +774,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         job.encoded_page = nullptr;
         job.encoded_page_size = 0;
         job.errmsg.clear();
+        job.stage = 0;
     }
 
     // pool of EncodeJob instances, to minimize allocations
@@ -804,9 +806,13 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             // use ThreadPool to run encoding jobs in parallel and upsert jobs serially
             upsert_thread_pool_.Enqueue(
                 job.release(),
-                [](void *job) noexcept {
-                    ((EncodeJob *)job)->SniffPageType();
-                    ((EncodeJob *)job)->Execute();
+                [](void *x) noexcept {
+                    EncodeJob *job = (EncodeJob *)x;
+                    assert(job->stage == 0);
+                    job->stage = 1;
+                    job->SniffPageType();
+                    job->Execute();
+                    assert(job->stage == 1);
                     return job;
                 },
                 [this](void *job) noexcept { this->ExecuteUpsert((EncodeJob *)job); });
@@ -828,6 +834,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         OUTER_DEBUG_LOCK();
         std::unique_ptr<EncodeJob> job(pjob);
         assert(job->page.size() == page_size_);
+        assert(job->stage == 1);
+        job->stage = 2;
         try {
             if (!job->errmsg.empty()) {
                 throw std::runtime_error(job->errmsg);
@@ -869,6 +877,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 }
             }
 
+            assert(job->stage == 2);
             {
                 // return to buffer pool
                 std::lock_guard<std::mutex> lock(encode_job_pool_mutex_);
