@@ -643,6 +643,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             seek_lock.unlock();
             // Wait for WIP jobs
             fetch_thread_pool_.Barrier();
+            std::atomic_thread_fence(std::memory_order_seq_cst);
         }
         // wipe all prefetch cursors
         for (auto &job : fetch_jobs_) {
@@ -886,6 +887,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     // wait for background upserts to complete + raise any error message
     void UpsertBarrier(bool ignore_error = false) {
         upsert_thread_pool_.Barrier();
+        std::atomic_thread_fence(std::memory_order_seq_cst);
         if (!ignore_error && !upsert_errmsg_.empty()) {
             throw SQLite::Exception(upsert_errmsg_, SQLITE_IOERR_WRITE);
         }
