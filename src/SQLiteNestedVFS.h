@@ -64,7 +64,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
     std::unique_ptr<SQLite::Database> outer_db_;
     std::string inner_db_pages_table_;
-    bool read_only_, web_;
+    bool read_only_, web_, closed_ = false;
 
     std::string btree_interior_index_;
 
@@ -831,7 +831,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             if (!job->errmsg.empty()) {
                 throw std::runtime_error(job->errmsg);
             }
-            auto &upsert = job->insert ? insert_page_ : update_page_;
+            SQLite::Statement *upsert = job->insert ? insert_page_.get() : update_page_.get();
+            assert(upsert);
             upsert->clearBindings();
             upsert->bindNoCopy(1, job->encoded_page, job->encoded_page_size);
             if (!job->meta1null) {
@@ -1057,6 +1058,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     }
 
     int Close() override {
+        assert(!closed_);
         try {
             PrefetchBarrier();
             if (!read_only_) {
@@ -1081,12 +1083,16 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             t_decode += job->t_decode;
         }
         if (sequential + non_sequential) {
-            _DBG << "reads sequential: " << sequential << " non-sequential: " << non_sequential
+            _DBG << outer_db_->getFilename() << " "
+                 << "reads sequential: " << sequential << " non-sequential: " << non_sequential
                  << " interior: " << interior_hits << " longest: " << longest_read_
                  << " prefetched: " << prefetch_wins_ << " wasted: " << prefetch_wasted_
                  << " seek: " << t_seek.count() / 1000000
                  << "ms decode: " << t_decode.count() / 1000000 << "ms" << _EOL;
         }
+        closed_ = true;
+        _DBG << "xClose " << outer_db_->getFilename() << _EOL;
+        assert(web_ || outer_db_->execAndGet("PRAGMA quick_check").getString() == "ok");
         return SQLiteVFS::File::Close();
     }
 
@@ -1147,6 +1153,8 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             btree_interior_index_.clear();
         }
     }
+
+    virtual ~InnerDatabaseFile() { assert(closed_); }
 }; // namespace SQLiteNested
 
 // issue when write performance is prioritized over transaction safety / possible corruption
@@ -1272,7 +1280,7 @@ class VFS : public SQLiteVFS::Wrapper {
                 } else if (sqlite3_uri_boolean(zName, "immutable", 0)) {
                     outer_db_uri += "?immutable=1";
                 }
-                _DBG << outer_db_uri << _EOL;
+                _DBG << "xOpen " << outer_db_uri << _EOL;
 
                 try {
                     // open outer database
