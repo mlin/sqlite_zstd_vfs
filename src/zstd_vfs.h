@@ -215,7 +215,8 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
                 if (last_dict >= 0) {
                     cur_dict_page_count_ = EnsureDictCached(last_dict).dict_page_count;
                     cur_dict_ = last_dict;
-                    _DBG << "loaded dict " << cur_dict_ << " @ " << cur_dict_page_count_ << _EOL;
+                    _DBG << outer_db_->getFilename() << " loaded dict " << cur_dict_ << " @ "
+                         << cur_dict_page_count_ << _EOL;
                 }
             }
         }
@@ -253,7 +254,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
                     *outer_db_, "INSERT INTO nested_vfs_zstd_dicts(dict,page_count) VALUES(?,?)"));
             }
             StatementResetter put_dict_resetter(*put_dict_);
-            put_dict_->bindNoCopy(1, dict.data(), dict.size());
+            put_dict_->bind(1, dict.data(), dict.size());
             put_dict_->bind(2, dict_page_count);
             begin();
             if (put_dict_->exec() != 1) {
@@ -270,8 +271,8 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             cur_dict_page_count_ = dict_page_count;
             cur_dict_pages_written_ = 0;
             std::chrono::nanoseconds t = std::chrono::high_resolution_clock::now() - t0;
-            _DBG << "dict " << dict_id << " @ " << dict_page_count << " " << t.count() / 1000000
-                 << "ms" << _EOL;
+            _DBG << outer_db_->getFilename() << " dict " << dict_id << " @ " << dict_page_count
+                 << " " << t.count() / 1000000 << "ms" << _EOL;
         }
     }
 
