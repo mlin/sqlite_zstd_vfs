@@ -1297,7 +1297,7 @@ class VFS : public SQLiteVFS::Wrapper {
                 try {
                     // open outer database
                     std::unique_ptr<SQLite::Database> outer_db(new SQLite::Database(
-                        outer_db_uri, flags | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI, 0, vfs));
+                        outer_db_uri, flags | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_URI, 0, vfs));
                     // see comment in Lock() about possibe future relaxation of exclusive
                     // locking
                     outer_db->exec("PRAGMA locking_mode=EXCLUSIVE");
