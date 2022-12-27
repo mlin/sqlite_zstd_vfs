@@ -146,14 +146,13 @@ class InnerDatabaseFile : public SQLiteVFS::File {
      *********************************************************************************************/
 
     // Holds state for a background page fetch: reading it from the outer database and decoding it
-    // on a background thread, to hide decompression time while reading sequential pages.
+    // on background threads, to hide decompression time while reading sequential pages.
     // Several tricky bits:
-    // 1. Interactions with the outer database must be serialized, while decoding may parallelize.
-    // 2. After seeking to a page in the outer database, keep the cursor open so that it can be
+    // 1. After seeking to a page in the outer database, keep the cursor open so that it can be
     //    reused if we're later asked for the next sequential page.
-    // 3. When the main thread wants a page that isn't being prefetched, let it cut in line.
-    // 4. When the main thread wants a page that's currently being prefetched, have it wait.
-    // 5. Little thread synchronization overhead is affordable, as Zstandard decompression of a
+    // 2. When the main thread wants a page that isn't being prefetched, read it immediately.
+    // 3. When the main thread wants a page that's currently being prefetched, wait for it.
+    // 4. Little thread synchronization overhead is affordable, as Zstandard decompression of a
     //    SQLite page (4-64 KiB) takes only 1-10 microseconds -- about 10x time to memcpy.
     // Subclasses may in turn subclass this to add their own logic to SeekCursor and DecodePage.
     struct FetchJob {
@@ -240,8 +239,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             last_op = 0;
         }
 
-        // move cursor to pageno, by next() if possible, otherwise from scratch. these operations
-        // must be serialized, as they deal with the outer db.
+        // move cursor to pageno, by next() if possible, otherwise de novo
         void SeekCursor() {
 #ifndef NDEBUG
             auto t0 = std::chrono::high_resolution_clock::now();
@@ -313,8 +311,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 #endif
         }
 
-        // Override to add additional logic after seeking cursor (still under the seek lock), such
-        // as reading the meta columns.
+        // Override to add additional logic after seeking cursor, such as reading the meta columns.
         virtual void FinishSeek(SQLite::Statement &sought_cursor) {}
 
         // Decode one page from the blob stored in the outer db. Override me!
@@ -356,22 +353,12 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     const size_t MAX_FETCH_CURSORS = 4;
     std::vector<std::unique_ptr<FetchJob>> fetch_jobs_;
     ThreadPoolWithEnqueueFast fetch_thread_pool_;
-    std::atomic<bool> seek_interrupt_; // broadcast that main thread wants priority
 
     unsigned long long read_opcount_ = 0, prefetch_wins_ = 0, prefetch_wasted_ = 0;
     sqlite3_int64 longest_read_ = 0;
 
     void *BackgroundFetchJob(void *ctx) noexcept {
         FetchJob *job = (FetchJob *)ctx;
-        while (seek_interrupt_.load(std::memory_order_relaxed)) {
-            // yield to main thread
-            // https://rigtorp.se/spinlock/
-#ifdef __x86_64__
-            __builtin_ia32_pause();
-#else
-            std::this_thread::yield();
-#endif
-        }
         if (!job->TransitionState(FetchJob::State::QUEUE, FetchJob::State::WIP)) {
             return nullptr; // they took our job!!!!
         }
@@ -435,20 +422,13 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         }
 
         if (foreground) {
-            // We've got the ball; cut in line and decode the page directly into dest. This elides
-            // a memcpy, often one from another processor die.
+            // We've got the ball; decode the page directly into dest. This elides a memcpy, often
+            // one from another processor die.
             job->dest = dest;
-            seek_interrupt_.store(true, std::memory_order_relaxed);
-            try {
-                job->Execute();
-                seek_interrupt_.store(false, std::memory_order_relaxed);
-            } catch (...) {
-                seek_interrupt_.store(false, std::memory_order_relaxed);
-                throw;
-            }
+            job->Execute();
             assert(job->GetState() == FetchJob::State::DONE);
         } else {
-            // Semi-busy-wait for background job to finish
+            // Semi-busy-wait for background prefetch job to finish
             // https://rigtorp.se/spinlock/
             while (true) {
                 if (job->GetState() == FetchJob::State::DONE) {
@@ -597,18 +577,11 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
     void PrefetchBarrier() {
         if (fetch_thread_pool_.MaxThreads() > 1) {
-            // Abort prefetch jobs that haven't started yet
-            seek_interrupt_.store(true, std::memory_order_relaxed);
-            try {
-                for (auto &job : fetch_jobs_) {
-                    if (job->TransitionState(FetchJob::State::QUEUE, FetchJob::State::NEW)) {
-                        job->Renew();
-                    }
+            // Abort any prefetch jobs that haven't yet started
+            for (auto &job : fetch_jobs_) {
+                if (job->TransitionState(FetchJob::State::QUEUE, FetchJob::State::NEW)) {
+                    job->Renew();
                 }
-                seek_interrupt_.store(false, std::memory_order_relaxed);
-            } catch (...) {
-                seek_interrupt_.store(false, std::memory_order_relaxed);
-                throw;
             }
             // Wait for WIP jobs
             fetch_thread_pool_.Barrier();
@@ -1095,8 +1068,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                              "SELECT IFNULL(MAX(pageno), 0) FROM " + inner_db_pages_table_),
           upsert_thread_pool_(threads, threads * 3),
           fetch_thread_pool_(std::min(noprefetch ? 1 : threads, MAX_FETCH_CURSORS),
-                             MAX_FETCH_CURSORS),
-          seek_interrupt_(false) {
+                             MAX_FETCH_CURSORS) {
         assert(threads);
         fetch_jobs_.reserve(MAX_FETCH_CURSORS); // important! ensure fetch_jobs_.data() never moves
         methods_.iVersion = 1;
