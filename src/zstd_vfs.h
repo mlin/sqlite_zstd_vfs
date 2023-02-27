@@ -263,7 +263,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             cur_dict_page_count_ = dict_page_count;
             cur_dict_pages_written_ = 0;
             std::chrono::nanoseconds t = std::chrono::high_resolution_clock::now() - t0;
-            SQLITE_NVFS_LOG(3, "trained dict " << dict_id << " page_count =" << dict_page_count
+            SQLITE_NVFS_LOG(3, "trained dict " << dict_id << " page_count=" << dict_page_count
                                                << " " << t.count() / 1000000 << "ms")
         }
     }

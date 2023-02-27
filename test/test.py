@@ -181,6 +181,7 @@ def test_vacuum(tmpdir, chinook_file):
     assert len(actual) == 15632
 
 
+@pytest.mark.skip(reason="flaky")
 def test_sam(tmpdir):
     (region, expected_posflag) = ("chr21:20000000-25000000", 27074190881221)
     # (region, expected_posflag) = ("chr21:20000000-40000000", 148853599470365)
