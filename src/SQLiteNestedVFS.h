@@ -34,14 +34,6 @@
 #include <unistd.h>
 #endif
 
-#include <iostream>
-#define _EOL std::endl
-#ifndef NDEBUG
-#define _DBG std::cerr << __FILE__ << ":" << __LINE__ << ": "
-#else
-#define _DBG false && std::cerr
-#endif
-
 namespace SQLiteNested {
 // Implements I/O methods for the "inner" main database file.
 // KEY ASSUMPTIONS:
@@ -62,6 +54,9 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         ~StatementResetter() { stmt_.tryReset(); }
     };
 
+    const std::string log_filename_;
+#define SQLITE_NVFS_LOG(msg_level, msg)                                                            \
+    SQLITE_VFS_LOG(msg_level, '[' << log_filename_ << "] " << msg)
     std::unique_ptr<SQLite::Database> outer_db_;
     std::string inner_db_pages_table_;
     bool read_only_, web_;
@@ -114,8 +109,9 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 sz = rslt.getInt64();
             }
             if (sz <= 0 || sz > 65536) {
-                throw SQLite::Exception("invalid page size in nested VFS page table",
-                                        SQLITE_CORRUPT);
+                auto msg = "invalid page size in nested VFS page table";
+                SQLITE_NVFS_LOG(1, msg)
+                throw SQLite::Exception(msg, SQLITE_CORRUPT);
             }
             page_size_ = (size_t)sz;
         }
@@ -136,7 +132,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             *pSize = DetectPageSize() * DetectPageCount();
             return SQLITE_OK;
         } catch (std::exception &exn) {
-            _DBG << exn.what() << _EOL;
+            SQLITE_NVFS_LOG(1, exn.what())
             return SQLITE_IOERR;
         }
     }
@@ -448,7 +444,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         }
 
         if (!job->errmsg.empty()) {
-            _DBG << job->errmsg << _EOL;
+            SQLITE_NVFS_LOG(1, job->errmsg)
             job->Renew();
             PrefetchBarrier();
             throw SQLite::Exception(job->errmsg, SQLITE_IOERR_READ);
@@ -566,7 +562,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             longest_read_ = std::max((sqlite3_int64)iAmt, longest_read_);
             return SQLITE_OK;
         } catch (SQLite::Exception &exn) {
-            _DBG << exn.what() << _EOL;
+            SQLITE_NVFS_LOG(1, exn.what())
             switch (exn.getErrorCode()) {
             case SQLITE_CORRUPT:
                 return SQLITE_CORRUPT;
@@ -752,7 +748,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 [this](void *job) noexcept { this->ExecuteUpsert((EncodeJob *)job); });
 
         } catch (std::exception &exn) {
-            _DBG << exn.what() << _EOL;
+            SQLITE_NVFS_LOG(1, exn.what())
             page_count_ = 0; // to be redetected
             throw;
         }
@@ -769,6 +765,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         assert(job->page.size() == page_size_);
         try {
             if (!job->errmsg.empty()) {
+                SQLITE_NVFS_LOG(1, job->errmsg)
                 throw std::runtime_error(job->errmsg);
             }
             SQLite::Statement *upsert = upsert =
@@ -817,7 +814,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         } catch (std::exception &exn) {
             std::string errmsg =
                 std::string("background page encoding/upsert failed: ") + exn.what();
-            _DBG << errmsg << _EOL;
+            SQLITE_NVFS_LOG(1, errmsg)
             if (upsert_errmsg_.empty()) {
                 upsert_errmsg_ = errmsg;
             }
@@ -884,7 +881,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             assert(sofar == iAmt);
             return SQLITE_OK;
         } catch (std::exception &exn) {
-            _DBG << exn.what() << _EOL;
+            SQLITE_NVFS_LOG(1, exn.what())
             UpsertBarrier(true);
             page_count_ = 0; // to be redetected
             return SQLITE_IOERR_WRITE;
@@ -919,7 +916,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             assert(VerifyPageCount());
             return SQLITE_OK;
         } catch (std::exception &exn) {
-            _DBG << exn.what() << _EOL;
+            SQLITE_NVFS_LOG(1, exn.what())
             page_count_ = 0; // to be redetected
             return SQLITE_IOERR_TRUNCATE;
         }
@@ -930,7 +927,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         try {
             UpsertBarrier();
         } catch (std::exception &exn) {
-            _DBG << exn.what() << _EOL;
+            SQLITE_NVFS_LOG(1, exn.what())
             page_count_ = 0; // to be redetected
             return SQLITE_IOERR_WRITE;
         }
@@ -941,10 +938,11 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 txn_.reset();
             }
         } catch (SQLite::Exception &exn) {
-            _DBG << exn.what() << _EOL;
+            SQLITE_NVFS_LOG(1, exn.what())
             page_count_ = 0; // to be redetected
             return exn.getErrorCode();
         }
+        SQLITE_NVFS_LOG(4, "xSync")
         return SQLITE_OK;
     }
 
@@ -974,7 +972,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             try {
                 PrefetchBarrier();
             } catch (SQLite::Exception &exn) {
-                _DBG << exn.what() << _EOL;
+                SQLITE_NVFS_LOG(1, exn.what())
                 return exn.getErrorCode();
             }
         }
@@ -1005,7 +1003,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 outer_db_->exec("PRAGMA incremental_vacuum");
             }
         } catch (SQLite::Exception &exn) {
-            _DBG << exn.what() << _EOL;
+            SQLITE_NVFS_LOG(1, exn.what())
             return exn.getErrorCode();
         }
         unsigned long long sequential = 0, non_sequential = 0, interior_hits = 0;
@@ -1019,12 +1017,15 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             t_decode += job->t_decode;
         }
         if (sequential + non_sequential) {
-            _DBG << outer_db_->getFilename() << " reads sequential: " << sequential
-                 << " non-sequential: " << non_sequential << " interior: " << interior_hits
-                 << " longest: " << longest_read_ << " prefetched: " << prefetch_wins_
-                 << " wasted: " << prefetch_wasted_ << " seek: " << t_seek.count() / 1000000
-                 << "ms decode: " << t_decode.count() / 1000000 << "ms" << _EOL;
+            SQLITE_NVFS_LOG(4, "reads sequential: "
+                                   << sequential << " non-sequential: " << non_sequential
+                                   << " interior: " << interior_hits << " longest: "
+                                   << longest_read_ << " prefetched: " << prefetch_wins_
+                                   << " wasted: " << prefetch_wasted_
+                                   << " seek: " << t_seek.count() / 1000000
+                                   << "ms decode: " << t_decode.count() / 1000000 << "ms")
         }
+        SQLITE_NVFS_LOG(3, "xClose")
         return SQLiteVFS::File::Close();
     }
 
@@ -1057,10 +1058,11 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     }
 
   public:
-    InnerDatabaseFile(std::unique_ptr<SQLite::Database> &&outer_db,
+    InnerDatabaseFile(const char *zName, const std::string &log_filename,
+                      std::unique_ptr<SQLite::Database> &&outer_db,
                       const std::string &inner_db_tablename_prefix, bool read_only, size_t threads,
                       bool noprefetch, bool web)
-        : outer_db_(std::move(outer_db)),
+        : SQLiteVFS::File(zName), log_filename_(log_filename), outer_db_(std::move(outer_db)),
           inner_db_pages_table_(inner_db_tablename_prefix + "pages"), read_only_(read_only),
           web_(web),
           // MAX(pageno) instead of COUNT(pageno) because the latter would trigger table scan
@@ -1083,8 +1085,11 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 .getInt() != 1) {
             btree_interior_index_.clear();
         }
+
+        SQLITE_NVFS_LOG(
+            4, "InnerDatabaseFile() btree_interior_index=" << !btree_interior_index_.empty())
     }
-}; // namespace SQLiteNested
+};
 
 // issue when write performance is prioritized over transaction safety / possible corruption
 const char *UNSAFE_PRAGMAS =
@@ -1159,10 +1164,12 @@ class VFS : public SQLiteVFS::Wrapper {
     }
 
     virtual std::unique_ptr<SQLiteVFS::File>
-    NewInnerDatabaseFile(const char *zName, std::unique_ptr<SQLite::Database> &&outer_db,
-                         bool read_only, size_t threads, bool noprefetch, bool web) {
-        return std::unique_ptr<SQLiteVFS::File>(new InnerDatabaseFile(
-            std::move(outer_db), inner_db_tablename_prefix_, read_only, threads, noprefetch, web));
+    NewInnerDatabaseFile(const char *zName, const std::string &log_filename,
+                         std::unique_ptr<SQLite::Database> &&outer_db, bool read_only,
+                         size_t threads, bool noprefetch, bool web) {
+        return std::unique_ptr<SQLiteVFS::File>(
+            new InnerDatabaseFile(zName, log_filename, std::move(outer_db),
+                                  inner_db_tablename_prefix_, read_only, threads, noprefetch, web));
     }
 
     int Open(const char *zName, sqlite3_file *pFile, int flags, int *pOutFlags) override {
@@ -1189,16 +1196,22 @@ class VFS : public SQLiteVFS::Wrapper {
                 }
 
                 std::string vfs;
+                std::string log_filename_ = outer_db_filename; // basename to put in log messages
                 std::string outer_db_uri = "file:" + urlencode(outer_db_filename, true);
                 bool unsafe = sqlite3_uri_boolean(zName, "outer_unsafe", 0);
                 if (web) {
                     // use sqlite_web_vfs, passing through configuration
                     outer_db_uri += "?immutable=1";
-                    for (const char *passthrough : {"web_log", "web_insecure", "web_url",
-                                                    "web_dbi_url", "web_nodbi", "web_small_KiB"}) {
-                        if (sqlite3_uri_parameter(zName, passthrough)) {
+                    for (const std::string passthrough :
+                         {"vfs_log", "web_insecure", "web_url", "web_dbi_url", "web_nodbi",
+                          "web_small_KiB"}) {
+                        auto param = sqlite3_uri_parameter(zName, passthrough.c_str());
+                        if (param) {
                             outer_db_uri += std::string("&") + passthrough + std::string("=") +
-                                            urlencode(sqlite3_uri_parameter(zName, passthrough));
+                                            urlencode(param);
+                            if (passthrough == "web_url") {
+                                log_filename_ = param;
+                            }
                         }
                     }
                     flags &= ~(SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
@@ -1209,7 +1222,14 @@ class VFS : public SQLiteVFS::Wrapper {
                 } else if (sqlite3_uri_boolean(zName, "immutable", 0)) {
                     outer_db_uri += "?immutable=1";
                 }
-                _DBG << "xOpen " << outer_db_uri << _EOL;
+                if (log_filename_.rfind('/') != std::string::npos) {
+                    log_filename_ = log_filename_.substr(log_filename_.rfind('/') + 1);
+                }
+                if (log_filename_.find('?') != std::string::npos) {
+                    log_filename_ = log_filename_.substr(0, log_filename_.find('?'));
+                }
+                SQLiteVFS::Logger log_(zName); // intentionally shadow this->log_ to read &vfs_log=
+                SQLITE_NVFS_LOG(3, "xOpen " << outer_db_uri)
 
                 try {
                     // open outer database
@@ -1238,6 +1258,7 @@ class VFS : public SQLiteVFS::Wrapper {
                         }
                         // page_size directive must precede auto_vacuum in order to be effective
                         outer_db->exec("PRAGMA auto_vacuum=INCREMENTAL");
+                        SQLITE_NVFS_LOG(4, "InitOuterDB() outer_page_size=" << outer_page_size)
                         SQLite::Transaction txn(*outer_db);
                         InitOuterDB(zName, *outer_db);
                         txn.commit();
@@ -1256,7 +1277,10 @@ class VFS : public SQLiteVFS::Wrapper {
                     }
                     bool noprefetch = sqlite3_uri_boolean(zName, "noprefetch", 0);
 
-                    auto idbf = NewInnerDatabaseFile(zName, std::move(outer_db),
+                    SQLITE_NVFS_LOG(4, "InnerDatabaseFile() outer_cache_size="
+                                           << outer_cache_size << " threads=" << threads
+                                           << " unsafe=" << unsafe)
+                    auto idbf = NewInnerDatabaseFile(zName, log_filename_, std::move(outer_db),
                                                      (flags & SQLITE_OPEN_READONLY),
                                                      (size_t)threads, noprefetch, web);
                     idbf->InitHandle(pFile);
@@ -1266,7 +1290,7 @@ class VFS : public SQLiteVFS::Wrapper {
                     return SQLITE_OK;
                 } catch (SQLite::Exception &exn) {
                     last_error_ = exn.getErrorStr();
-                    _DBG << last_error_ << _EOL;
+                    SQLITE_NVFS_LOG(1, last_error_)
                     return SQLITE_CANTOPEN;
                 }
             }
@@ -1294,6 +1318,7 @@ class VFS : public SQLiteVFS::Wrapper {
     // filesystem, but xOpen() will recognize). This ensures the inner & outer journals will have
     // distinct filenames.
     int FullPathname(const char *zName, int nPathOut, char *zPathOut) override {
+        SQLiteVFS::Logger log_(zName); // intentionally shadow this->log_ to read &vfs_log=
         std::string zName2(zName);
         if (zName2 == "/__web__") {
             // unnecessary for read-only web access
@@ -1311,7 +1336,8 @@ class VFS : public SQLiteVFS::Wrapper {
 #endif
         int rc = SQLiteVFS::Wrapper::FullPathname(zName2.c_str(), nPathOut, zPathOut);
         if (rc != SQLITE_OK && rc != SQLITE_OK_SYMLINK) {
-            _DBG << "FullPathName " << rc << " " << sqlite3_errstr(rc) << _EOL;
+            SQLITE_VFS_LOG(1,
+                           "FullPathname " << zName2 << " => " << rc << " " << sqlite3_errstr(rc))
             return rc;
         }
         std::string outer_db_filename(zPathOut);
@@ -1327,6 +1353,7 @@ class VFS : public SQLiteVFS::Wrapper {
         }
         strncpy(zPathOut, inner_db_filename.c_str(), nPathOut - 1);
         zPathOut[nPathOut] = 0;
+        SQLITE_VFS_LOG(4, "FullPathname " << zName2 << " => " << zPathOut)
         return SQLITE_OK;
     }
 
@@ -1341,6 +1368,3 @@ class VFS : public SQLiteVFS::Wrapper {
 };
 
 } // namespace SQLiteNested
-
-#undef _DBG
-#undef _EOL

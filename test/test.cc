@@ -194,7 +194,7 @@ bool UpdateCells(SQLite::Database &db, SQLite::Statement &get_state, SQLite::Sta
         cerr << endl;
     }
     ElementaryCellularAutomaton(rule, state, new_state);
-    bool ans;
+    bool ans = false;
     for (sqlite3_int64 i = 0; i < new_state.size(); ++i) {
         auto pos = i - sqlite3_int64(new_state.size()) / 2;
         auto *stmt = (pos >= (0 - n / 2) && pos <= n / 2) ? &update : &insert;
@@ -260,7 +260,7 @@ TEST_CASE("cellular_automata") {
         SQLite::Statement ctrl_get_state(control, get_state), expt_get_state(experiment, get_state);
         cerr << endl;
         for (int t = 1; t <= 250; t++) {
-            bool rule30bit;
+            bool rule30bit = false;
             for (auto rule : rules) {
                 bool ans = UpdateCells(control, ctrl_get_state, ctrl_insert, ctrl_update, rule, 30);
                 rule30bit = rule == 30 ? ans : rule30bit;

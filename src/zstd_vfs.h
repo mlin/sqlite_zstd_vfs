@@ -19,13 +19,6 @@
 #include <set>
 #include <sstream>
 
-#define _EOL std::endl
-#ifndef NDEBUG
-#define _DBG std::cerr << __FILE__ << ":" << __LINE__ << ": "
-#else
-#define _DBG false && std::cerr
-#endif
-
 class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
   protected:
     using super = SQLiteNested::InnerDatabaseFile;
@@ -215,8 +208,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
                 if (last_dict >= 0) {
                     cur_dict_page_count_ = EnsureDictCached(last_dict).dict_page_count;
                     cur_dict_ = last_dict;
-                    _DBG << outer_db_->getFilename() << " loaded dict " << cur_dict_ << " @ "
-                         << cur_dict_page_count_ << _EOL;
+                    SQLITE_NVFS_LOG(4, "loaded dict " << cur_dict_ << " @ " << cur_dict_page_count_)
                 }
             }
         }
@@ -242,7 +234,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             size_t zrc = ZDICT_trainFromBuffer(dict.data(), dict_size_target_, pages.data(),
                                                pages_sizes.data(), dict_training_pages_);
             if (ZDICT_isError(zrc)) {
-                _DBG << "dict training failed: " << ZDICT_getErrorName(zrc) << _EOL;
+                SQLITE_NVFS_LOG(1, "dict training failed: " << ZDICT_getErrorName(zrc))
                 throw SQLite::Exception(ZDICT_getErrorName(zrc), SQLITE_IOERR_WRITE);
             }
             dict.resize(zrc);
@@ -271,8 +263,8 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             cur_dict_page_count_ = dict_page_count;
             cur_dict_pages_written_ = 0;
             std::chrono::nanoseconds t = std::chrono::high_resolution_clock::now() - t0;
-            _DBG << outer_db_->getFilename() << " dict " << dict_id << " @ " << dict_page_count
-                 << " " << t.count() / 1000000 << "ms" << _EOL;
+            SQLITE_NVFS_LOG(3, "trained dict " << dict_id << " page_count =" << dict_page_count
+                                               << " " << t.count() / 1000000 << "ms")
         }
     }
 
@@ -349,14 +341,16 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
     static const int DEFAULT_COMPRESSION_LEVEL = 3;
     static const size_t DEFAULT_DICT_TRAINING_PAGES = 100;
     static const size_t DEFAULT_DICT_SIZE_TARGET = 98304;
-    ZstdInnerDatabaseFile(std::unique_ptr<SQLite::Database> &&outer_db,
+    ZstdInnerDatabaseFile(const char *zName, const std::string &log_filename,
+                          std::unique_ptr<SQLite::Database> &&outer_db,
                           const std::string &inner_db_tablename_prefix, bool read_only,
                           size_t threads, bool noprefetch, bool web, bool enable_dict = true,
                           int compression_level = DEFAULT_COMPRESSION_LEVEL,
                           size_t dict_training_pages = DEFAULT_DICT_TRAINING_PAGES,
                           size_t dict_size_target = DEFAULT_DICT_SIZE_TARGET)
-        : SQLiteNested::InnerDatabaseFile(std::move(outer_db), inner_db_tablename_prefix, read_only,
-                                          threads, noprefetch, web),
+        : SQLiteNested::InnerDatabaseFile(zName, log_filename, std::move(outer_db),
+                                          inner_db_tablename_prefix, read_only, threads, noprefetch,
+                                          web),
           enable_dict_(enable_dict), compression_level_(compression_level),
           dict_training_pages_(dict_training_pages), dict_size_target_(dict_size_target) {}
 };
@@ -375,19 +369,17 @@ class ZstdVFS : public SQLiteNested::VFS {
     }
 
     virtual std::unique_ptr<SQLiteVFS::File>
-    NewInnerDatabaseFile(const char *zName, std::unique_ptr<SQLite::Database> &&outer_db,
-                         bool read_only, size_t threads, bool noprefetch, bool web) override {
+    NewInnerDatabaseFile(const char *zName, const std::string &log_filename,
+                         std::unique_ptr<SQLite::Database> &&outer_db, bool read_only,
+                         size_t threads, bool noprefetch, bool web) override {
         bool enable_dict = sqlite3_uri_boolean(zName, "dict", true);
         int compression_level =
             sqlite3_uri_int64(zName, "level", ZstdInnerDatabaseFile::DEFAULT_COMPRESSION_LEVEL);
-        return std::unique_ptr<SQLiteVFS::File>(
-            new ZstdInnerDatabaseFile(std::move(outer_db), inner_db_tablename_prefix_, read_only,
-                                      threads, noprefetch, web, enable_dict, compression_level));
+        return std::unique_ptr<SQLiteVFS::File>(new ZstdInnerDatabaseFile(
+            zName, log_filename, std::move(outer_db), inner_db_tablename_prefix_, read_only,
+            threads, noprefetch, web, enable_dict, compression_level));
     }
 
   public:
     ZstdVFS() { inner_db_tablename_prefix_ = "nested_vfs_zstd_"; }
 };
-
-#undef _DBG
-#undef _EOL
