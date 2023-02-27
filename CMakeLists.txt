@@ -29,7 +29,7 @@ include_directories(${sqlitecpp_SOURCE_DIR}/include)
 FetchContent_Declare(
     sqlite_web_vfs
     GIT_REPOSITORY  https://github.com/mlin/sqlite_web_vfs.git
-    GIT_TAG         9ae962d
+    GIT_TAG         e316c81
 )
 FetchContent_MakeAvailable(sqlite_web_vfs)
 FetchContent_MakeAvailable(concurrentqueue)
@@ -77,5 +77,5 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     include(CTest)
     enable_testing()
     add_test(NAME test_exe COMMAND ./test_exe -d yes)
-    add_test(NAME pytest COMMAND env SQLITE_WEB_LOG=99 python3 -m pytest -sv ${CMAKE_CURRENT_SOURCE_DIR}/test/test.py)
+    add_test(NAME pytest COMMAND env SQLITE_VFS_LOG=99 python3 -m pytest -sv ${CMAKE_CURRENT_SOURCE_DIR}/test/test.py)
 endif()
