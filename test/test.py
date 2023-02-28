@@ -2,7 +2,7 @@ import sys
 import os
 import subprocess
 import multiprocessing
-import tempfile
+import shlex
 import json
 import contextlib
 import time
@@ -181,21 +181,16 @@ def test_vacuum(tmpdir, chinook_file):
     assert len(actual) == 15632
 
 
-@pytest.mark.skip(reason="flaky")
 def test_sam(tmpdir):
-    (region, expected_posflag) = ("chr21:20000000-25000000", 27074190881221)
+    (region, expected_posflag) = ("chr21:20000000-22500000", 12601293751857)
+    # (region, expected_posflag) = ("chr21:20000000-25000000", 27074190881221)
     # (region, expected_posflag) = ("chr21:20000000-40000000", 148853599470365)
     page_size = 16384
     outer_page_size = 65536
     level = 9
+    bam_path = os.path.join(os.path.dirname(__file__), "NA12878.chr21:20000000-22500000.bam")
     subprocess.run(
-        f"samtools view -O BAM -@ 4 -o {region}.bam https://s3.amazonaws.com/1000genomes/1000G_2504_high_coverage/data/ERR3239334/NA12878.final.cram {region}",
-        check=True,
-        shell=True,
-        cwd=tmpdir,
-    )
-    subprocess.run(
-        f"samtools view {region}.bam | zstd -8 -T0 - -o {region}.sam.zst",
+        f"samtools view {shlex.quote(bam_path)} | zstd -8 -T0 - -o {region}.sam.zst",
         check=True,
         shell=True,
         cwd=tmpdir,
