@@ -72,6 +72,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
         dict_cache_entry &operator=(dict_cache_entry &&) = default;
     };
     std::map<sqlite_int64, dict_cache_entry> dict_cache_;
+    std::mutex dict_cache_lock_;
 
     dict_cache_entry &EnsureDictCached(sqlite_int64 dict_id) {
         assert(dict_id >= 0);
@@ -97,6 +98,8 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
         ent.dict_page_count = get_dict_->getColumn(1).getInt64();
         ent.level = compression_level_;
         dict_cache_[dict_id] = std::move(ent);
+        SQLITE_NVFS_LOG(4, "loaded dict " << dict_id << " page_count=" << ent.dict_page_count
+                                          << " size=" << dict.getBytes())
         return dict_cache_[dict_id];
     }
 
@@ -125,6 +128,10 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
                 plain = true;
             } else if (meta1.isInteger()) {
                 sqlite3_int64 dict_id = meta1.getInt64();
+                // We need to lock dict_cache_ because multiple prefetch worker threads may be
+                // FinishSeek'ing concurrently. But there is NO possible race with the write path
+                // (InitEncodeJob & UpdateCurDict) which are preceded by a prefetch barrier.
+                std::lock_guard<std::mutex> lock(that->dict_cache_lock_);
                 ddict = dict_id >= 0 ? that->EnsureDictCached(dict_id).ensure_ddict() : nullptr;
             } else {
                 throw SQLite::Exception("unexpected meta1 entry in zstd page table",
@@ -208,7 +215,8 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
                 if (last_dict >= 0) {
                     cur_dict_page_count_ = EnsureDictCached(last_dict).dict_page_count;
                     cur_dict_ = last_dict;
-                    SQLITE_NVFS_LOG(4, "loaded dict " << cur_dict_ << " @ " << cur_dict_page_count_)
+                    SQLITE_NVFS_LOG(3, "primed with dict "
+                                           << cur_dict_ << " page_count=" << cur_dict_page_count_)
                 }
             }
         }
@@ -264,7 +272,8 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             cur_dict_pages_written_ = 0;
             std::chrono::nanoseconds t = std::chrono::high_resolution_clock::now() - t0;
             SQLITE_NVFS_LOG(3, "trained dict " << dict_id << " page_count=" << dict_page_count
-                                               << " " << t.count() / 1000000 << "ms")
+                                               << " size=" << dict.size() << " "
+                                               << t.count() / 1000000 << "ms")
         }
     }
 
