@@ -193,8 +193,6 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                                             " NOT INDEXED WHERE pageno >= ? ORDER BY pageno"),
               page_size(that.page_size_) {
             PutState(State::NEW);
-            // prepare to read from btree interior index in web mode only. it can be
-            // counterproductive locally due to its big index keys => low fan-out
             if (!that.btree_interior_index_.empty()) {
                 btree_interior_cursor.reset(new SQLite::Statement(
                     *(that.outer_db_), "SELECT pageno, data, meta1, meta2 FROM " +
@@ -254,10 +252,13 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                     // costly to search due to its large btree keys (=> low fan-out). Therefore, we
                     // first search the pageno-only index so that we can skip the costlier lookup
                     // in the common case that it'd fail anyway (like a bloom filter, but exact).
-                    if (btree_interior_pageno_cursor &&
-                        (btree_interior_pageno_cursor->reset(),
-                         btree_interior_pageno_cursor->bind(1, pageno),
-                         btree_interior_pageno_cursor->executeStep())) {
+                    bool btree_interior_pageno_hit = false;
+                    if (btree_interior_pageno_cursor) {
+                        btree_interior_pageno_cursor->reset();
+                        btree_interior_pageno_cursor->bind(1, pageno);
+                        btree_interior_pageno_hit = btree_interior_pageno_cursor->executeStep();
+                    }
+                    if (btree_interior_pageno_hit) {
                         assert(btree_interior_cursor);
                         btree_interior_cursor->reset();
                         btree_interior_cursor->bind(1, pageno);
