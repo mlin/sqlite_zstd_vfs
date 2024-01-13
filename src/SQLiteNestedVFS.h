@@ -1005,6 +1005,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             }
         } catch (SQLite::Exception &exn) {
             SQLITE_NVFS_LOG(1, exn.what())
+            SQLiteVFS::File::Close(); // deletes this
             return exn.getErrorCode();
         }
         unsigned long long sequential = 0, non_sequential = 0, interior_hits = 0;
@@ -1027,7 +1028,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                                    << "ms decode: " << t_decode.count() / 1000000 << "ms")
         }
         SQLITE_NVFS_LOG(3, "xClose")
-        return SQLiteVFS::File::Close();
+        return SQLiteVFS::File::Close(); // deletes this
     }
 
     int ShmMap(int iPg, int pgsz, int isWrite, void volatile **pp) override {
@@ -1199,7 +1200,8 @@ class VFS : public SQLiteVFS::Wrapper {
                 std::string vfs;
                 std::string log_filename_ = outer_db_filename; // basename to put in log messages
                 std::string outer_db_uri = "file:" + urlencode(outer_db_filename, true);
-                bool unsafe = sqlite3_uri_boolean(zName, "outer_unsafe", 0);
+                bool unsafe = sqlite3_uri_boolean(zName, "outer_unsafe", 0),
+                     immutable = sqlite3_uri_boolean(zName, "immutable", 0);
                 if (web) {
                     // use sqlite_web_vfs, passing through configuration
                     outer_db_uri += "?immutable=1";
@@ -1220,7 +1222,7 @@ class VFS : public SQLiteVFS::Wrapper {
                     vfs = "web";
                 } else if (unsafe) {
                     outer_db_uri += "?nolock=1&psow=1";
-                } else if (sqlite3_uri_boolean(zName, "immutable", 0)) {
+                } else if (immutable) {
                     outer_db_uri += "?immutable=1";
                 }
                 if (log_filename_.rfind('/') != std::string::npos) {
@@ -1282,7 +1284,7 @@ class VFS : public SQLiteVFS::Wrapper {
                                            << outer_cache_size << " threads=" << threads
                                            << " unsafe=" << unsafe)
                     auto idbf = NewInnerDatabaseFile(zName, log_filename_, std::move(outer_db),
-                                                     (flags & SQLITE_OPEN_READONLY),
+                                                     (flags & SQLITE_OPEN_READONLY) || immutable,
                                                      (size_t)threads, noprefetch, web);
                     idbf->InitHandle(pFile);
                     assert(pFile->pMethods);
