@@ -1,0 +1,248 @@
+name: diag-test-sam
+on:
+  workflow_dispatch:
+jobs:
+  diag:
+    runs-on: macos-15
+    steps:
+    - uses: actions/checkout@v7
+    - name: dependencies
+      run: |
+        brew install python sqlite zstd samtools aria2
+        $(brew --prefix)/bin/pip3 install --break-system-packages pytest pytest-xdist
+        # test web_vfs using the older system libcurl
+        brew uninstall --ignore-dependencies curl
+        curl --version
+        which curl
+        otool -L $(which curl)
+    - name: build (Debug)
+      run: |
+        CXXFLAGS="-I$(brew --prefix)/include -I$(brew --prefix)/opt/sqlite/include" \
+        LDFLAGS="-L$(brew --prefix)/lib -L$(brew --prefix)/opt/sqlite/lib" \
+          cmake -DCMAKE_BUILD_TYPE=Debug \
+                -DCMAKE_PREFIX_PATH=$(brew --prefix)/opt/sqlite \
+                -B build .
+        cmake --build build -j 4
+    - name: setup PATH and workspace (mirrors the tests.yml ctest step)
+      run: |
+        export PREFIX=$(brew --prefix)
+        echo "PATH=$(ls -p1 ${PREFIX}/opt/python@*)/bin:${PREFIX}/opt/sqlite/bin:$PATH" >> "$GITHUB_ENV"
+        mkdir -p "$GITHUB_WORKSPACE/diag-out" "$GITHUB_WORKSPACE/diag-work"
+        {
+          echo "## diag-test-sam census"
+          echo "Per-stage census of the test_sam creation pipeline on the runner itself."
+          echo "Full outputs are in the diag-test-sam-census artifact."
+        } >> "$GITHUB_STEP_SUMMARY"
+    - name: census 1 - binary census
+      run: |
+        set +e
+        OUT="$GITHUB_WORKSPACE/diag-out"
+        {
+          echo "date (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "uname: $(uname -a)"
+          echo "PATH=$PATH"
+          echo
+          echo "== resolution with the ctest step's PATH =="
+          for t in sqlite3 awk sed zstd samtools python3; do
+            echo "-- $t: $(command -v $t)"
+          done
+          echo
+          echo "== all sqlite3 on the system =="
+          which -a sqlite3
+          echo
+          echo "== versions =="
+          echo "-- brew sqlite3:"; sqlite3 --version
+          echo "-- /usr/bin/sqlite3:"; /usr/bin/sqlite3 --version
+          echo "-- awk:"; awk --version 2>&1 | head -2
+          echo "-- sed:"; sed --version 2>&1 | head -2
+          echo "-- zstd:"; zstd --version
+          echo "-- samtools:"; samtools --version | head -2
+          echo
+          echo "== brew sqlite keg =="
+          ls -l "$(brew --prefix)/opt/sqlite/bin"
+        } > "$OUT/step1-binaries.txt" 2>&1 || true
+        cat "$OUT/step1-binaries.txt"
+        {
+          echo "## Census 1 - binaries"
+          echo '```text'
+          cat "$OUT/step1-binaries.txt"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+    - name: census 2 - producer census (stream written to a file)
+      run: |
+        set +e
+        OUT="$GITHUB_WORKSPACE/diag-out"
+        cd "$GITHUB_WORKSPACE/diag-work"
+        {
+          REGION='chr21:20000000-22500000'
+          BAM="$GITHUB_WORKSPACE/test/NA12878.chr21:20000000-22500000.bam"
+          echo "== generate sam2sql.awk exactly as test/test.py test_sam writes it =="
+          cat > sam2sql.awk <<'AWKEOF'
+        
+                    BEGIN {
+                        print "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA locking_mode=EXCLUSIVE; PRAGMA auto_vacuum=FULL;";
+                        print "BEGIN;";
+                        print "CREATE TABLE sam(qname TEXT NOT NULL, flag INTEGER NOT NULL, rname TEXT, pos INTEGER, mapq INTEGER, cigar TEXT, rnext TEXT, pnext INTEGER, tlen INTEGER, seq TEXT NOT NULL, qual TEXT, tags TEXT, rg TEXT);"
+                    }
+                    {
+                        printf("INSERT INTO sam(qname,flag,rname,pos,mapq,cigar,rnext,pnext,tlen,seq,qual,tags,rg) VALUES('%s',%d,'%s',%d,%d,'%s','%s',%d,%d,'%s','%s','",$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                        for (i=12; i<NF; i++) {
+                            printf("%s\t",$i);
+                        }
+                        printf("','%s');\n",substr($NF,6));
+                    }
+                    END {
+                        #print "CREATE INDEX sam_pos on sam(rname,pos);"
+                        print "COMMIT;";
+                    }
+        AWKEOF
+          wc -c sam2sql.awk
+          echo
+          echo "== regenerate region.sam.zst exactly as the test does =="
+          echo "samtools view $BAM | zstd -8 -T0 - -o $REGION.sam.zst"
+          samtools view "$BAM" | zstd -8 -T0 - -o "$REGION.sam.zst"
+          ps=("${PIPESTATUS[@]}")
+          echo "PIPESTATUS (samtools zstd): ${ps[*]}"
+          ls -l "$REGION.sam.zst"
+          echo
+          echo "== SAM record count (expect 592861) =="
+          zstd -dc "$REGION.sam.zst" | wc -l
+          ps=("${PIPESTATUS[@]}")
+          echo "PIPESTATUS (zstd wc): ${ps[*]}"
+          echo
+          echo "== full producer chain to stream.sql, per-stage exit codes =="
+          set -o pipefail
+          zstd -dc "$REGION.sam.zst" | sed s/\'/\'\'/g | awk -f sam2sql.awk > stream.sql
+          ps=("${PIPESTATUS[@]}")
+          echo "producer chain PIPESTATUS (zstd sed awk): ${ps[*]}"
+          set +o pipefail
+          wc -lc stream.sql
+          echo "-- stream head:"; head -3 stream.sql
+          echo "-- stream tail (expect COMMIT;):"; tail -1 stream.sql
+        } > "$OUT/step2-producers.txt" 2>&1 || true
+        cat "$OUT/step2-producers.txt"
+        {
+          echo "## Census 2 - producers"
+          echo '```text'
+          cat "$OUT/step2-producers.txt"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+    - name: census 3 - consumer A (stream into a plain DB, no VFS)
+      run: |
+        set +e
+        OUT="$GITHUB_WORKSPACE/diag-out"
+        cd "$GITHUB_WORKSPACE/diag-work"
+        {
+          echo "== sqlite3 plain.db < stream.sql =="
+          sqlite3 plain.db < stream.sql
+          echo "rc=$?"
+          ls -l plain.db
+          echo "-- select count(*), sum(pos+flag) from sam (expect 592861 / 12601293751857):"
+          sqlite3 plain.db 'select count(*), sum(pos+flag) from sam;'
+          echo "rc=$?"
+        } > "$OUT/step3-consumer-plain.txt" 2>&1 || true
+        cat "$OUT/step3-consumer-plain.txt"
+        {
+          echo "## Census 3 - consumer A (plain DB, no VFS)"
+          echo '```text'
+          cat "$OUT/step3-consumer-plain.txt"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+    - name: census 4 - consumer B (exact test pipeline, writer log captured)
+      run: |
+        set +e
+        OUT="$GITHUB_WORKSPACE/diag-out"
+        cd "$GITHUB_WORKSPACE/diag-work"
+        {
+          REGION='chr21:20000000-22500000'
+          export SQLITE_VFS_LOG=99
+          echo "== exact test_sam creation pipeline (dict variant), per-stage stderr files =="
+          zstd -dc "$REGION.sam.zst" 2> stage-zstd.err \
+            | sed s/\'/\'\'/g 2> stage-sed.err \
+            | awk -f sam2sql.awk 2> stage-awk.err \
+            | sqlite3 :memory: -bail \
+                -cmd ".load $GITHUB_WORKSPACE/build/zstd_vfs" \
+                -cmd ".open file:$REGION.zstd.sqlite?vfs=zstd&outer_unsafe=true&outer_page_size=65536&level=9" \
+                -cmd 'PRAGMA page_size=16384' \
+                > writer-b.stdout 2> writer-b.log
+          ps=("${PIPESTATUS[@]}")
+          echo "PIPESTATUS (zstd sed awk sqlite3): ${ps[*]}"
+          echo
+          echo "== per-stage stderr =="
+          for f in stage-zstd.err stage-sed.err stage-awk.err; do
+            echo "-- $f ($(wc -c < $f) bytes):"; cat "$f"
+          done
+          echo
+          echo "== resulting DB =="
+          ls -l "$REGION.zstd.sqlite"
+          echo "-- outer page rows (healthy: 18514):"
+          sqlite3 "$REGION.zstd.sqlite" 'select count(*) from nested_vfs_zstd_pages;'
+          echo "rc=$?"
+          echo "-- inner rows via the VFS (healthy: 592861 / 12601293751857):"
+          sqlite3 :memory: -bail \
+            -cmd ".load $GITHUB_WORKSPACE/build/zstd_vfs" \
+            -cmd ".open file:$REGION.zstd.sqlite?mode=ro&vfs=zstd" \
+            'select count(*), sum(pos+flag) from sam;'
+          echo "rc=$?"
+          echo
+          echo "== writer log census =="
+          echo "trained dict lines: $(grep -c 'trained dict' writer-b.log)"
+          echo "btree_interior_index=1 lines: $(grep -c 'btree_interior_index=1' writer-b.log)"
+          echo "-- writer log tail:"; tail -20 writer-b.log
+          cp writer-b.log stage-zstd.err stage-sed.err stage-awk.err writer-b.stdout "$OUT/"
+        } > "$OUT/step4-consumer-pipe.txt" 2>&1 || true
+        cat "$OUT/step4-consumer-pipe.txt"
+        {
+          echo "## Census 4 - consumer B (exact pipeline)"
+          echo '```text'
+          cat "$OUT/step4-consumer-pipe.txt"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+    - name: census 5 - consumer C (file-fed stream into the VFS)
+      run: |
+        set +e
+        OUT="$GITHUB_WORKSPACE/diag-out"
+        cd "$GITHUB_WORKSPACE/diag-work"
+        {
+          REGION='chr21:20000000-22500000'
+          export SQLITE_VFS_LOG=99
+          echo "== same writer invocation as census 4, stdin redirected from stream.sql =="
+          sqlite3 :memory: -bail \
+            -cmd ".load $GITHUB_WORKSPACE/build/zstd_vfs" \
+            -cmd ".open file:$REGION.zstd.filefed.sqlite?vfs=zstd&outer_unsafe=true&outer_page_size=65536&level=9" \
+            -cmd 'PRAGMA page_size=16384' \
+            < stream.sql > writer-c.stdout 2> writer-c.log
+          echo "rc=$?"
+          echo
+          echo "== resulting DB =="
+          ls -l "$REGION.zstd.filefed.sqlite"
+          echo "-- outer page rows (healthy: 18514):"
+          sqlite3 "$REGION.zstd.filefed.sqlite" 'select count(*) from nested_vfs_zstd_pages;'
+          echo "rc=$?"
+          echo "-- inner rows via the VFS (healthy: 592861 / 12601293751857):"
+          sqlite3 :memory: -bail \
+            -cmd ".load $GITHUB_WORKSPACE/build/zstd_vfs" \
+            -cmd ".open file:$REGION.zstd.filefed.sqlite?mode=ro&vfs=zstd" \
+            'select count(*), sum(pos+flag) from sam;'
+          echo "rc=$?"
+          echo
+          echo "== writer log census =="
+          echo "trained dict lines: $(grep -c 'trained dict' writer-c.log)"
+          echo "btree_interior_index=1 lines: $(grep -c 'btree_interior_index=1' writer-c.log)"
+          echo "-- writer log tail:"; tail -20 writer-c.log
+          cp writer-c.log writer-c.stdout "$OUT/"
+        } > "$OUT/step5-consumer-filefed.txt" 2>&1 || true
+        cat "$OUT/step5-consumer-filefed.txt"
+        {
+          echo "## Census 5 - consumer C (file-fed)"
+          echo '```text'
+          cat "$OUT/step5-consumer-filefed.txt"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+    - name: upload census artifact
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: diag-test-sam-census
+        path: diag-out/
+        if-no-files-found: warn
