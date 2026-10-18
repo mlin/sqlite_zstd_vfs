@@ -228,13 +228,15 @@ def test_sam(tmpdir):
             }
         """
         )
+    # NOTE: PRAGMA page_size is fed as the first line of the SQL stream rather than via
+    # -cmd: sqlite3 shell >= 3.52 exits immediately after an SQL -cmd when -bail is set,
+    # without ever reading stdin (upstream shell regression; dot-command -cmds unaffected).
     subprocess.run(
         f"""
-        zstd -dc {region}.sam.zst | sed s/\\'/\\'\\'/g | awk -f sam2sql.awk \
+        {{ echo 'PRAGMA page_size={page_size};'; zstd -dc {region}.sam.zst | sed s/\\'/\\'\\'/g | awk -f sam2sql.awk; }} \
             | sqlite3 :memory: -bail \
                 -cmd '.load {os.path.join(BUILD,'zstd_vfs')}' \
-                -cmd '.open file:{region}.zstd.sqlite?vfs=zstd&outer_unsafe=true&outer_page_size={outer_page_size}&level={level}' \
-                -cmd 'PRAGMA page_size={page_size}'
+                -cmd '.open file:{region}.zstd.sqlite?vfs=zstd&outer_unsafe=true&outer_page_size={outer_page_size}&level={level}'
         """,
         check=True,
         shell=True,
@@ -242,11 +244,10 @@ def test_sam(tmpdir):
     )
     subprocess.run(
         f"""
-        zstd -dc {region}.sam.zst | sed s/\\'/\\'\\'/g | awk -f sam2sql.awk \
+        {{ echo 'PRAGMA page_size={page_size};'; zstd -dc {region}.sam.zst | sed s/\\'/\\'\\'/g | awk -f sam2sql.awk; }} \
             | sqlite3 :memory: -bail \
                 -cmd '.load {os.path.join(BUILD,'zstd_vfs')}' \
-                -cmd '.open file:{region}.zstd.nodict.sqlite?vfs=zstd&outer_unsafe=true&outer_page_size={outer_page_size}&level={level}&dict=false' \
-                -cmd 'PRAGMA page_size={page_size}'
+                -cmd '.open file:{region}.zstd.nodict.sqlite?vfs=zstd&outer_unsafe=true&outer_page_size={outer_page_size}&level={level}&dict=false'
         """,
         check=True,
         shell=True,
