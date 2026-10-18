@@ -91,7 +91,6 @@ def test_roundtrip_zstd(tmpdir, chinook_file):
         universal_newlines=True,
     )
     expected = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
-    assert len(expected) == 15632
 
     # open the nested database
     con = sqlite3.connect(f":memory:")
@@ -178,7 +177,20 @@ def test_vacuum(tmpdir, chinook_file):
         universal_newlines=True,
     )
     actual = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
-    assert len(actual) == 15632
+
+    # dump from the original database; the vacuumed copy's dump must equal it
+    # (compare content, not a hardcoded statement count: the fixture is an
+    # unpinned third-party download whose dump composition drifts)
+    rslt = subprocess.run(
+        f"sqlite3 :memory: -bail -cmd '.open file:{chinook_file}?mode=ro' -cmd .dump -cmd .exit",
+        check=True,
+        shell=True,
+        cwd=tmpdir,
+        stdout=subprocess.PIPE,
+        universal_newlines=True,
+    )
+    expected = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
+    assert actual == expected
 
 
 def test_sam(tmpdir):
