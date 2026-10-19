@@ -1,13 +1,14 @@
-import sys
-import os
-import subprocess
-import multiprocessing
-import shlex
-import json
 import contextlib
-import time
+import json
+import multiprocessing
+import os
+import shlex
 import sqlite3
+import subprocess
+import sys
+import time
 import urllib.parse
+
 import pytest
 
 HERE = os.path.dirname(__file__)

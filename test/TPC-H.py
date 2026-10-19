@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-import sys
-import os
-import subprocess
-import contextlib
-import time
-import sqlite3
 import argparse
+import contextlib
 import json
+import os
+import sqlite3
+import subprocess
+import sys
+import time
 
 HERE = os.path.dirname(__file__)
 BUILD = os.path.abspath(os.path.join(HERE, "..", "build"))
