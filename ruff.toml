@@ -1,0 +1,25 @@
+# Ruff configuration -- Python formatting and linting for this repo.
+# Adopted 2026-10, replacing black (formatting) and flake8 (linting).
+# (pylint was installed in the Docker image but never configured or run
+# here, so there were no pylint checks to port.)
+# Line length matches the former `black -l 100` setting.
+line-length = 100
+
+[lint]
+# The flake8 rule families (E/F/W), as configured for this project.
+select = ["E", "F", "W"]
+ignore = [
+    # E501 (line too long): line length is policed by `ruff format`, not
+    # the linter; long strings/comments may legitimately exceed it.
+    # Carried over from the flake8 --ignore list used by the
+    # project (GenomicSQLite's pre-commit hook).
+    "E501",
+    # E722 (bare except): tolerated in this codebase.
+    # Carried over from the flake8 --ignore list used by the
+    # project (GenomicSQLite's pre-commit hook).
+    "E722",
+    # Note: the flake8 --ignore list also named W503 (line break before
+    # binary operator). Ruff removed W503/W504 entirely (they conflict
+    # with the formatter), so there is no selector to carry over; it was
+    # a relaxation, not an enforced check, so nothing is lost.
+]
