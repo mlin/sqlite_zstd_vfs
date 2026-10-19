@@ -3,6 +3,13 @@ if(${CMAKE_VERSION} VERSION_LESS 3.12)
     cmake_policy(VERSION ${CMAKE_MAJOR_VERSION}.${CMAKE_MINOR_VERSION})
 endif()
 
+# CMake 4 removed compatibility with projects declaring
+# cmake_minimum_required() below 3.5; the pinned SQLiteCpp fetched
+# below declares 3.1, which makes configure fail outright under
+# CMake 4 (e.g. the macos-15 runner image). Raise the policy-version
+# floor for fetched subprojects; harmless under older CMake.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
 include(FetchContent)
 
 if(${CMAKE_VERSION} VERSION_LESS 3.14)

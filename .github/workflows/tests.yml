@@ -7,22 +7,22 @@ jobs:
       matrix:
         BUILD_TYPE: [Debug, Release]
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v7
     - name: docker build
       run: sudo docker build -t tests --build-arg build_type=${{ matrix.BUILD_TYPE }} .
     - name: run tests
       run: sudo docker run tests
   macOS:
-    runs-on: macOS-10.15
+    runs-on: macos-15
     strategy:
       matrix:
         BUILD_TYPE: [Debug, Release]
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v7
     - name: dependencies
       run: |
         brew install python sqlite zstd samtools aria2
-        /usr/local/bin/pip3 install pytest pytest-xdist
+        $(brew --prefix)/bin/pip3 install --break-system-packages pytest pytest-xdist
         # test web_vfs using the older system libcurl
         brew uninstall --ignore-dependencies curl
         curl --version
