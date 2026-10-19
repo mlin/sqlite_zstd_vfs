@@ -91,7 +91,6 @@ def test_roundtrip_zstd(tmpdir, chinook_file):
         universal_newlines=True,
     )
     expected = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
-    assert len(expected) == 15632
 
     # open the nested database
     con = sqlite3.connect(f":memory:")
@@ -178,7 +177,20 @@ def test_vacuum(tmpdir, chinook_file):
         universal_newlines=True,
     )
     actual = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
-    assert len(actual) == 15632
+
+    # dump from the original database; the vacuumed copy's dump must equal it
+    # (compare content, not a hardcoded statement count: the fixture is an
+    # unpinned third-party download whose dump composition drifts)
+    rslt = subprocess.run(
+        f"sqlite3 :memory: -bail -cmd '.open file:{chinook_file}?mode=ro' -cmd .dump -cmd .exit",
+        check=True,
+        shell=True,
+        cwd=tmpdir,
+        stdout=subprocess.PIPE,
+        universal_newlines=True,
+    )
+    expected = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
+    assert actual == expected
 
 
 def test_sam(tmpdir):
@@ -216,13 +228,15 @@ def test_sam(tmpdir):
             }
         """
         )
+    # NOTE: PRAGMA page_size is fed as the first line of the SQL stream rather than via
+    # -cmd: sqlite3 shell >= 3.52 exits immediately after an SQL -cmd when -bail is set,
+    # without ever reading stdin (upstream shell regression; dot-command -cmds unaffected).
     subprocess.run(
         f"""
-        zstd -dc {region}.sam.zst | sed s/\\'/\\'\\'/g | awk -f sam2sql.awk \
+        {{ echo 'PRAGMA page_size={page_size};'; zstd -dc {region}.sam.zst | sed s/\\'/\\'\\'/g | awk -f sam2sql.awk; }} \
             | sqlite3 :memory: -bail \
                 -cmd '.load {os.path.join(BUILD,'zstd_vfs')}' \
-                -cmd '.open file:{region}.zstd.sqlite?vfs=zstd&outer_unsafe=true&outer_page_size={outer_page_size}&level={level}' \
-                -cmd 'PRAGMA page_size={page_size}'
+                -cmd '.open file:{region}.zstd.sqlite?vfs=zstd&outer_unsafe=true&outer_page_size={outer_page_size}&level={level}'
         """,
         check=True,
         shell=True,
@@ -230,11 +244,10 @@ def test_sam(tmpdir):
     )
     subprocess.run(
         f"""
-        zstd -dc {region}.sam.zst | sed s/\\'/\\'\\'/g | awk -f sam2sql.awk \
+        {{ echo 'PRAGMA page_size={page_size};'; zstd -dc {region}.sam.zst | sed s/\\'/\\'\\'/g | awk -f sam2sql.awk; }} \
             | sqlite3 :memory: -bail \
                 -cmd '.load {os.path.join(BUILD,'zstd_vfs')}' \
-                -cmd '.open file:{region}.zstd.nodict.sqlite?vfs=zstd&outer_unsafe=true&outer_page_size={outer_page_size}&level={level}&dict=false' \
-                -cmd 'PRAGMA page_size={page_size}'
+                -cmd '.open file:{region}.zstd.nodict.sqlite?vfs=zstd&outer_unsafe=true&outer_page_size={outer_page_size}&level={level}&dict=false'
         """,
         check=True,
         shell=True,
