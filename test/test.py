@@ -38,7 +38,7 @@ def test_roundtrip(tmpdir, chinook_file):
         shell=True,
         cwd=tmpdir,
         stdout=subprocess.PIPE,
-        universal_newlines=True,
+        text=True,
     )
     expected = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
 
@@ -75,7 +75,7 @@ def test_roundtrip(tmpdir, chinook_file):
         shell=True,
         cwd=tmpdir,
         stdout=subprocess.PIPE,
-        universal_newlines=True,
+        text=True,
     )
     actual = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
     assert actual == expected
@@ -89,7 +89,7 @@ def test_roundtrip_zstd(tmpdir, chinook_file):
         shell=True,
         cwd=tmpdir,
         stdout=subprocess.PIPE,
-        universal_newlines=True,
+        text=True,
     )
     expected = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
 
@@ -126,7 +126,7 @@ def test_roundtrip_zstd(tmpdir, chinook_file):
         shell=True,
         cwd=tmpdir,
         stdout=subprocess.PIPE,
-        universal_newlines=True,
+        text=True,
     )
     actual = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
     assert actual == expected
@@ -175,7 +175,7 @@ def test_vacuum(tmpdir, chinook_file):
         shell=True,
         cwd=tmpdir,
         stdout=subprocess.PIPE,
-        universal_newlines=True,
+        text=True,
     )
     actual = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
 
@@ -188,7 +188,7 @@ def test_vacuum(tmpdir, chinook_file):
         shell=True,
         cwd=tmpdir,
         stdout=subprocess.PIPE,
-        universal_newlines=True,
+        text=True,
     )
     expected = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
     assert actual == expected
@@ -260,7 +260,7 @@ def test_sam(tmpdir):
         shell=True,
         cwd=tmpdir,
     )
-    subprocess.run(["ls", "-lh"], cwd=tmpdir)
+    subprocess.run(["ls", "-lh"], cwd=tmpdir, check=False)
 
     # verify db file size is in the ballpark of the sam.zst file size
     sam_zst = os.path.join(tmpdir, f"{region}.sam.zst")
@@ -329,7 +329,7 @@ def test_tpch(tmpdir):
         ],
         check=True,
         stdout=subprocess.PIPE,
-        universal_newlines=True,
+        text=True,
     )
     print(results.stdout)
     results = json.loads(results.stdout)
