@@ -82,7 +82,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 throw SQLite::Exception("expected result from page count query", SQLITE_ERROR);
             }
             assert(select_page_count_.getColumn(0).isInteger());
-            sqlite3_int64 page_count = select_page_count_.getColumn(0).getInt64();
+            int64_t page_count = select_page_count_.getColumn(0).getInt64();
             assert(page_count >= 0);
             if (page_count > 0) {
                 page_count_ = page_count;
@@ -167,15 +167,15 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         }
         std::string errmsg; // nonempty = error
 
-        sqlite3_int64 pageno = 0; // desired page
+        int64_t pageno = 0; // desired page
         size_t page_size;
         void *dest = nullptr;        // If non-null, decode page directly here (foreground fetch)
         std::vector<char> decodebuf; // otherwise decode into this buffer (background fetch)
 
         SQLite::Statement cursor; // outer db cursor
         std::unique_ptr<SQLite::Statement> btree_interior_cursor, btree_interior_pageno_cursor;
-        sqlite3_int64 cursor_pageno = 0; // if >0 then cursor is currently on this page
-        unsigned long long last_op = 0;  // "time" of the cursor's last use
+        int64_t cursor_pageno = 0;      // if >0 then cursor is currently on this page
+        unsigned long long last_op = 0; // "time" of the cursor's last use
         bool was_sequential = false;
 
         const void *src = nullptr; // outer db page to be decoded
@@ -255,13 +255,13 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                     bool btree_interior_pageno_hit = false;
                     if (btree_interior_pageno_cursor) {
                         btree_interior_pageno_cursor->reset();
-                        btree_interior_pageno_cursor->bind(1, static_cast<int64_t>(pageno));
+                        btree_interior_pageno_cursor->bind(1, pageno);
                         btree_interior_pageno_hit = btree_interior_pageno_cursor->executeStep();
                     }
                     if (btree_interior_pageno_hit) {
                         assert(btree_interior_cursor);
                         btree_interior_cursor->reset();
-                        btree_interior_cursor->bind(1, static_cast<int64_t>(pageno));
+                        btree_interior_cursor->bind(1, pageno);
                         if (!btree_interior_cursor->executeStep()) {
                             // impossible
                             throw SQLite::Exception("inconsistent btree interior index, page " +
@@ -276,7 +276,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                         // otherwise seek the main cursor
                         ResetCursor();
 
-                        cursor.bind(1, static_cast<int64_t>(pageno));
+                        cursor.bind(1, pageno);
                     }
                 } else {
                     // main cursor will naturally step to the desired page
@@ -364,7 +364,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     }
 
     // Read page #pageno into dest, if possible by using a previously-scheduled prefetch.
-    void Read1Page(void *dest, sqlite3_int64 pageno, sqlite3_int64 pageno_hint = 0) {
+    void Read1Page(void *dest, int64_t pageno, int64_t pageno_hint = 0) {
         if (read_opcount_ == ULLONG_MAX) { // pedantic
             PrefetchBarrier();
             read_opcount_ = 0;
@@ -538,7 +538,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             std::vector<char> pagebuf;
 
             // scan them
-            for (sqlite3_int64 pageno = first_page; pageno <= last_page; ++pageno) {
+            for (int64_t pageno = first_page; pageno <= last_page; ++pageno) {
                 int page_ofs = sofar == 0 ? iOfst % page_size_ : 0;
                 int desired = std::min(iAmt - sofar, (int)page_size_ - page_ofs);
                 if (pageno != 1 || !ReadPlainPage1(zBuf, desired, page_ofs)) {
@@ -612,12 +612,12 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     // holds state of page-encoding background job
     struct EncodeJob {
         // job inputs
-        sqlite3_int64 pageno = -1;
+        int64_t pageno = -1;
         std::string page;
         bool insert = false;
 
         // job outputs
-        sqlite3_int64 meta1, meta2;
+        int64_t meta1, meta2;
         bool meta1null = true, meta2null = true;
         const char *encoded_page = nullptr;
         size_t encoded_page_size = 0;
@@ -695,7 +695,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     virtual std::unique_ptr<EncodeJob> NewEncodeJob() {
         return std::unique_ptr<EncodeJob>(new EncodeJob);
     }
-    virtual void InitEncodeJob(EncodeJob &job, sqlite3_int64 pageno, const void *page_data) {
+    virtual void InitEncodeJob(EncodeJob &job, int64_t pageno, const void *page_data) {
         // Initialize job in main thread
         job.pageno = pageno;
         job.insert = pageno > page_count_;
@@ -720,7 +720,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     std::string upsert_errmsg_;
 
     // enqueue page encoding+upsert on thread pool
-    void EnqueueUpsert(sqlite_int64 pageno, const void *page) {
+    void EnqueueUpsert(int64_t pageno, const void *page) {
         try {
             std::unique_ptr<EncodeJob> job;
             {
@@ -775,16 +775,16 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             upsert->clearBindings();
             upsert->bind(1, job->encoded_page, job->encoded_page_size);
             if (!job->meta1null) {
-                upsert->bind(2, static_cast<int64_t>(job->meta1));
+                upsert->bind(2, job->meta1);
             }
             if (!job->meta2null) {
-                upsert->bind(3, static_cast<int64_t>(job->meta2));
+                upsert->bind(3, job->meta2);
             }
             if (btree_interior_index_.empty()) {
-                upsert->bind(4, static_cast<int64_t>(job->pageno));
+                upsert->bind(4, job->pageno);
             } else {
                 upsert->bind(4, job->btree_interior);
-                upsert->bind(5, static_cast<int64_t>(job->pageno));
+                upsert->bind(5, job->pageno);
             }
 
             {
@@ -868,7 +868,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             begin();
             while (iOfst / page_size_ > DetectPageCount()) {
                 // write past current EOF; fill "hole" with zeroes
-                EnqueueUpsert(sqlite3_int64(page_count_ + 1), nullptr);
+                EnqueueUpsert(int64_t(page_count_ + 1), nullptr);
             }
 
             // upsert each provided page
@@ -900,7 +900,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             if (size < 0 || size % page_size_) {
                 return SQLITE_IOERR_TRUNCATE;
             }
-            sqlite3_int64 new_page_count = size / page_size_;
+            int64_t new_page_count = size / page_size_;
             if (new_page_count > DetectPageCount()) {
                 return SQLITE_IOERR_TRUNCATE;
             }
@@ -909,7 +909,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 delete_pages_.reset(new SQLite::Statement(
                     *outer_db_, "DELETE FROM " + inner_db_pages_table_ + " WHERE pageno > ?"));
             }
-            delete_pages_->bind(1, static_cast<int64_t>(new_page_count));
+            delete_pages_->bind(1, new_page_count);
             StatementResetter resetter(*delete_pages_);
             begin();
             delete_pages_->exec();
