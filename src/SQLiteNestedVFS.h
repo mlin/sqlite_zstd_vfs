@@ -82,7 +82,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 throw SQLite::Exception("expected result from page count query", SQLITE_ERROR);
             }
             assert(select_page_count_.getColumn(0).isInteger());
-            sqlite3_int64 page_count = select_page_count_.getColumn(0);
+            sqlite3_int64 page_count = select_page_count_.getColumn(0).getInt64();
             assert(page_count >= 0);
             if (page_count > 0) {
                 page_count_ = page_count;
@@ -255,13 +255,13 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                     bool btree_interior_pageno_hit = false;
                     if (btree_interior_pageno_cursor) {
                         btree_interior_pageno_cursor->reset();
-                        btree_interior_pageno_cursor->bind(1, pageno);
+                        btree_interior_pageno_cursor->bind(1, static_cast<int64_t>(pageno));
                         btree_interior_pageno_hit = btree_interior_pageno_cursor->executeStep();
                     }
                     if (btree_interior_pageno_hit) {
                         assert(btree_interior_cursor);
                         btree_interior_cursor->reset();
-                        btree_interior_cursor->bind(1, pageno);
+                        btree_interior_cursor->bind(1, static_cast<int64_t>(pageno));
                         if (!btree_interior_cursor->executeStep()) {
                             // impossible
                             throw SQLite::Exception("inconsistent btree interior index, page " +
@@ -276,7 +276,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                         // otherwise seek the main cursor
                         ResetCursor();
 
-                        cursor.bind(1, pageno);
+                        cursor.bind(1, static_cast<int64_t>(pageno));
                     }
                 } else {
                     // main cursor will naturally step to the desired page
@@ -775,16 +775,16 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             upsert->clearBindings();
             upsert->bind(1, job->encoded_page, job->encoded_page_size);
             if (!job->meta1null) {
-                upsert->bind(2, job->meta1);
+                upsert->bind(2, static_cast<int64_t>(job->meta1));
             }
             if (!job->meta2null) {
-                upsert->bind(3, job->meta2);
+                upsert->bind(3, static_cast<int64_t>(job->meta2));
             }
             if (btree_interior_index_.empty()) {
-                upsert->bind(4, job->pageno);
+                upsert->bind(4, static_cast<int64_t>(job->pageno));
             } else {
                 upsert->bind(4, job->btree_interior);
-                upsert->bind(5, job->pageno);
+                upsert->bind(5, static_cast<int64_t>(job->pageno));
             }
 
             {
@@ -800,7 +800,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                     upsert->bind(1, job->encoded_page,
                                  std::min(job->encoded_page_size, size_t(100)));
                     // keep meta1 & meta2 bindings, if any
-                    upsert->bind(btree_interior_index_.empty() ? 4 : 5, (sqlite_int64)-100);
+                    upsert->bind(btree_interior_index_.empty() ? 4 : 5, static_cast<int64_t>(-100));
                     if (upsert->exec() != 1) {
                         throw std::runtime_error("unexpected result from header upsert");
                     }
@@ -909,7 +909,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 delete_pages_.reset(new SQLite::Statement(
                     *outer_db_, "DELETE FROM " + inner_db_pages_table_ + " WHERE pageno > ?"));
             }
-            delete_pages_->bind(1, new_page_count);
+            delete_pages_->bind(1, static_cast<int64_t>(new_page_count));
             StatementResetter resetter(*delete_pages_);
             begin();
             delete_pages_->exec();

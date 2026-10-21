@@ -85,7 +85,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
                 *outer_db_, "SELECT dict, page_count FROM nested_vfs_zstd_dicts WHERE id = ?"));
         }
         StatementResetter resetter(*get_dict_);
-        get_dict_->bind(1, dict_id);
+        get_dict_->bind(1, static_cast<int64_t>(dict_id));
         if (!get_dict_->executeStep()) {
             throw SQLite::Exception("zstd page requires nonexistent dictionary", SQLITE_CORRUPT);
         }
@@ -255,7 +255,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             }
             StatementResetter put_dict_resetter(*put_dict_);
             put_dict_->bind(1, dict.data(), dict.size());
-            put_dict_->bind(2, dict_page_count);
+            put_dict_->bind(2, static_cast<int64_t>(dict_page_count));
             begin();
             if (put_dict_->exec() != 1) {
                 throw SQLite::Exception("unexpected result from dict insert", SQLITE_IOERR_WRITE);

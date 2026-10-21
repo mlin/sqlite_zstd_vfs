@@ -200,7 +200,7 @@ bool UpdateCells(SQLite::Database &db, SQLite::Statement &get_state, SQLite::Sta
         auto *stmt = (pos >= (0 - n / 2) && pos <= n / 2) ? &update : &insert;
         stmt->bind(1, new_state[i] ? 1 : 0);
         stmt->bind(2, rule);
-        stmt->bind(3, pos);
+        stmt->bind(3, static_cast<int64_t>(pos));
         stmt->exec();
         stmt->reset();
         if (pos == 0) {
