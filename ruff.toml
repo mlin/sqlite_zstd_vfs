@@ -1,4 +1,4 @@
-# Ruff: run on ruff's own defaults (Mike's lint policy, 2026-10-20).
+# Ruff: run on ruff's own defaults (project lint policy, 2026-10-20).
 # Opt out of specific rules only where warranted; each opt-out is documented
 # inline. No rule sets are selected or opted into.
 line-length = 100 # exception to the ruff default (88): matches this codebase's black -l 100 formatting; avoids a whole-tree reformat
