@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
-import sys
-import os
-import subprocess
-import contextlib
-import time
-import sqlite3
 import argparse
+import contextlib
 import json
+import os
+import sqlite3
+import subprocess
+import sys
+import time
 
 HERE = os.path.dirname(__file__)
 BUILD = os.path.abspath(os.path.join(HERE, "..", "build"))
 
 DB_URL = "https://github.com/mlin/sqlite_web_vfs/releases/download/test-db-v1/TPC-H.db"
 queries = {}
-queries[
-    "Q1"
-] = """
+queries["Q1"] = """
     select
         l_returnflag,
         l_linestatus,
@@ -30,9 +28,7 @@ queries[
     where l_shipdate <= date('1998-12-01', '-90 day')
     group by l_returnflag, l_linestatus order by l_returnflag, l_linestatus;
     """
-queries[
-    "Q8"
-] = """
+queries["Q8"] = """
     select
         o_year,
         sum(case when nation = 'BRAZIL' then volume else 0 end) / sum(volume) as mkt_share
@@ -104,7 +100,7 @@ def run(cache_MiB, level, threads, inner_page_KiB, outer_page_KiB):
     subprocess.run(f"cat {os.path.join(tmpdir, 'TPC-H.db')} > /dev/null", check=True, shell=True)
     con = sqlite3.connect(f"file:{os.path.join(tmpdir, 'TPC-H.db')}?mode=ro", uri=True)
     with timer(timings, "load"):
-        con.execute(f"PRAGMA page_size={1024*inner_page_KiB}")
+        con.execute(f"PRAGMA page_size={1024 * inner_page_KiB}")
         con.execute(f"VACUUM INTO '{os.path.join(tmpdir, 'TPC-H.vacuum.db')}'")
         con.close()
 
@@ -118,7 +114,7 @@ def run(cache_MiB, level, threads, inner_page_KiB, outer_page_KiB):
 
         con = sqlite3.connect(f"file:{os.path.join(tmpdir, 'TPC-H.vacuum.db')}?mode=ro", uri=True)
         if cache_MiB:
-            con.execute(f"PRAGMA cache_size={-1024*cache_MiB}")
+            con.execute(f"PRAGMA cache_size={-1024 * cache_MiB}")
         with timer(timings, query_name):
             results = list(con.execute(query_sql))
         con.close()
@@ -133,9 +129,9 @@ def run(cache_MiB, level, threads, inner_page_KiB, outer_page_KiB):
     con.enable_load_extension(True)
     con.load_extension(os.path.join(BUILD, "zstd_vfs"))
     with timer(timings, "load_zstd"):
-        con.execute(f"PRAGMA page_size={1024*inner_page_KiB}")
+        con.execute(f"PRAGMA page_size={1024 * inner_page_KiB}")
         con.execute(
-            f"VACUUM INTO 'file:{os.path.join(tmpdir, 'TPC-H.zstd.db')}?vfs=zstd&outer_unsafe=true&outer_page_size={1024*outer_page_KiB}&level={level}&threads={threads}'"
+            f"VACUUM INTO 'file:{os.path.join(tmpdir, 'TPC-H.zstd.db')}?vfs=zstd&outer_unsafe=true&outer_page_size={1024 * outer_page_KiB}&level={level}&threads={threads}'"
         )
         con.close()
     timings["db_size"] = os.path.getsize(os.path.join(tmpdir, "TPC-H.vacuum.db"))
@@ -166,12 +162,12 @@ def run(cache_MiB, level, threads, inner_page_KiB, outer_page_KiB):
 
 
 def connect_zstd(dbfn, mode="ro", cache_MiB=None, threads=1):
-    con = sqlite3.connect(f":memory:")
+    con = sqlite3.connect(":memory:")
     con.enable_load_extension(True)
     con.load_extension(os.path.join(BUILD, "zstd_vfs"))
     con = sqlite3.connect(f"file:{dbfn}?vfs=zstd&mode={mode}&threads={threads}", uri=True)
     if cache_MiB:
-        con.execute(f"PRAGMA cache_size={-1024*cache_MiB}")
+        con.execute(f"PRAGMA cache_size={-1024 * cache_MiB}")
     return con
 
 

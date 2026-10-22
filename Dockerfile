@@ -9,7 +9,7 @@ RUN apt-get -qq update && \
      ca-certificates curl wget git-core \
      build-essential cmake valgrind clang-format cppcheck \
      sqlite3 libsqlite3-dev libzstd-dev libcurl4-openssl-dev \
-     python3-pytest pylint black aria2 zstd samtools
+     python3-pytest aria2 zstd samtools
 
 ADD . /work
 WORKDIR /work

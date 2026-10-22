@@ -15,10 +15,12 @@ repos:
     verbose: true
     entry: cppcheck
     args: [-q,--language=c++]
-  - id: black
-    name: black
-    language: system
-    files: \.py$
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.17.1
+  hooks:
+  - id: ruff-check
+    name: ruff-check
     verbose: true
-    entry: black
-    args: [-l,'100']
+  - id: ruff-format
+    name: ruff-format
+    verbose: true

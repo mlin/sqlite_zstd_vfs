@@ -1,6 +1,19 @@
 name: tests
 on: [push, pull_request]
 jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v7
+    - name: deps
+      run: |
+        sudo apt-get -qq update
+        sudo apt-get install -y clang-format cppcheck python3-pip python3-venv
+        python3 -m venv "$HOME/.lint-venv"
+        "$HOME/.lint-venv/bin/pip" install pre-commit ruff
+        echo "$HOME/.lint-venv/bin" >> "$GITHUB_PATH"
+    - name: pre-commit
+      run: pre-commit run --all-files
   ctest:
     runs-on: ubuntu-latest
     strategy:

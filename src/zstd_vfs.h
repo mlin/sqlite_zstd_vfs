@@ -41,7 +41,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
     // in-memory cache of dict buffers and zstd de/compression dict structures, lazily populated
     struct dict_cache_entry {
         std::string dict;
-        sqlite_int64 dict_page_count = 0;
+        int64_t dict_page_count = 0;
         std::shared_ptr<ZSTD_CDict> cdict;
         std::shared_ptr<ZSTD_DDict> ddict;
         int level = 3;
@@ -71,10 +71,10 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
         dict_cache_entry(dict_cache_entry &&) = default;
         dict_cache_entry &operator=(dict_cache_entry &&) = default;
     };
-    std::map<sqlite_int64, dict_cache_entry> dict_cache_;
+    std::map<int64_t, dict_cache_entry> dict_cache_;
     std::mutex dict_cache_lock_;
 
-    dict_cache_entry &EnsureDictCached(sqlite_int64 dict_id) {
+    dict_cache_entry &EnsureDictCached(int64_t dict_id) {
         assert(dict_id >= 0);
         auto existing = dict_cache_.find(dict_id);
         if (existing != dict_cache_.end()) {
@@ -127,7 +127,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             if (meta1.isNull()) {
                 plain = true;
             } else if (meta1.isInteger()) {
-                sqlite3_int64 dict_id = meta1.getInt64();
+                int64_t dict_id = meta1.getInt64();
                 // We need to lock dict_cache_ because multiple prefetch worker threads may be
                 // FinishSeek'ing concurrently. But there is NO possible race with the write path
                 // (InitEncodeJob & UpdateCurDict) which are preceded by a prefetch barrier.
@@ -175,7 +175,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
     }
 
     // dict currently used for compression of new pages
-    sqlite_int64 cur_dict_ = -1;        // id (contents found in dict_cache_)
+    int64_t cur_dict_ = -1;             // id (contents found in dict_cache_)
     size_t cur_dict_page_count_ = 0;    // page count at the time cur_dict was created
     size_t cur_dict_pages_written_ = 0; // # pages written since we last created a new dict
 
@@ -211,7 +211,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             }
             StatementResetter resetter(*last_dict_id_);
             if (last_dict_id_->executeStep() && last_dict_id_->getColumn(0).isInteger()) {
-                sqlite_int64 last_dict = last_dict_id_->getColumn(0).getInt64();
+                int64_t last_dict = last_dict_id_->getColumn(0).getInt64();
                 if (last_dict >= 0) {
                     cur_dict_page_count_ = EnsureDictCached(last_dict).dict_page_count;
                     cur_dict_ = last_dict;
@@ -246,7 +246,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
                 throw SQLite::Exception(ZDICT_getErrorName(zrc), SQLITE_IOERR_WRITE);
             }
             dict.resize(zrc);
-            sqlite_int64 dict_page_count = std::max(cur_dict_pages_written_, page_count_);
+            int64_t dict_page_count = std::max(cur_dict_pages_written_, page_count_);
 
             // put new dict into the db
             if (!put_dict_) {
@@ -260,7 +260,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
             if (put_dict_->exec() != 1) {
                 throw SQLite::Exception("unexpected result from dict insert", SQLITE_IOERR_WRITE);
             }
-            sqlite_int64 dict_id = outer_db_->getLastInsertRowid();
+            int64_t dict_id = outer_db_->getLastInsertRowid();
             if (dict_id < 0) {
                 throw SQLite::Exception("unexpected rowid from dict insert", SQLITE_IOERR_WRITE);
             }
@@ -281,7 +281,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
         std::vector<char> buffer;
         int level = -1;
         ZSTD_CCtx *cctx = nullptr;
-        sqlite3_int64 dict_id = -1;
+        int64_t dict_id = -1;
         const ZSTD_CDict *cdict = nullptr;
 
         ~CompressJob() {
@@ -327,8 +327,7 @@ class ZstdInnerDatabaseFile : public SQLiteNested::InnerDatabaseFile {
     std::unique_ptr<super::EncodeJob> NewEncodeJob() override {
         return std::unique_ptr<super::EncodeJob>(new CompressJob);
     }
-    void InitEncodeJob(super::EncodeJob &superjob, sqlite3_int64 pageno,
-                       const void *page_data) override {
+    void InitEncodeJob(super::EncodeJob &superjob, int64_t pageno, const void *page_data) override {
         super::InitEncodeJob(superjob, pageno, page_data);
         auto &job = reinterpret_cast<CompressJob &>(superjob);
         if (!job.cctx && !(job.cctx = ZSTD_createCCtx())) {

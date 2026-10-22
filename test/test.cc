@@ -180,7 +180,7 @@ bool UpdateCells(SQLite::Database &db, SQLite::Statement &get_state, SQLite::Sta
                  SQLite::Statement &update, uint8_t rule, int log_rule = -1) {
     SQLite::Transaction txn(db);
     vector<bool> state, new_state;
-    sqlite3_int64 n = 0, last_pos;
+    int64_t n = 0, last_pos;
     for (get_state.bind(1, rule); get_state.executeStep(); ++n) {
         state.push_back(get_state.getColumn(0).getInt64() != 0);
         last_pos = get_state.getColumn(1).getInt64();
@@ -195,8 +195,8 @@ bool UpdateCells(SQLite::Database &db, SQLite::Statement &get_state, SQLite::Sta
     }
     ElementaryCellularAutomaton(rule, state, new_state);
     bool ans = false;
-    for (sqlite3_int64 i = 0; i < new_state.size(); ++i) {
-        auto pos = i - sqlite3_int64(new_state.size()) / 2;
+    for (int64_t i = 0; i < new_state.size(); ++i) {
+        auto pos = i - int64_t(new_state.size()) / 2;
         auto *stmt = (pos >= (0 - n / 2) && pos <= n / 2) ? &update : &insert;
         stmt->bind(1, new_state[i] ? 1 : 0);
         stmt->bind(2, rule);

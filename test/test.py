@@ -1,13 +1,14 @@
-import sys
-import os
-import subprocess
-import multiprocessing
-import shlex
-import json
 import contextlib
-import time
+import json
+import multiprocessing
+import os
+import shlex
 import sqlite3
+import subprocess
+import sys
+import time
 import urllib.parse
+
 import pytest
 
 HERE = os.path.dirname(__file__)
@@ -37,12 +38,12 @@ def test_roundtrip(tmpdir, chinook_file):
         shell=True,
         cwd=tmpdir,
         stdout=subprocess.PIPE,
-        universal_newlines=True,
+        text=True,
     )
     expected = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
 
     # open the nested database
-    con = sqlite3.connect(f":memory:")
+    con = sqlite3.connect(":memory:")
     con.enable_load_extension(True)
     con.load_extension(os.path.join(BUILD, "nested_vfs"))
     dbfn = os.path.join(tmpdir, "chinook_nested.sqlite")
@@ -69,12 +70,12 @@ def test_roundtrip(tmpdir, chinook_file):
 
     # dump from the nested version
     rslt = subprocess.run(
-        f"sqlite3 :memory: -bail -cmd '.load {os.path.join(BUILD,'nested_vfs')}' -cmd '.open file:{dbfn}?mode=ro&vfs=nested' -cmd .dump -cmd .exit",
+        f"sqlite3 :memory: -bail -cmd '.load {os.path.join(BUILD, 'nested_vfs')}' -cmd '.open file:{dbfn}?mode=ro&vfs=nested' -cmd .dump -cmd .exit",
         check=True,
         shell=True,
         cwd=tmpdir,
         stdout=subprocess.PIPE,
-        universal_newlines=True,
+        text=True,
     )
     actual = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
     assert actual == expected
@@ -88,12 +89,12 @@ def test_roundtrip_zstd(tmpdir, chinook_file):
         shell=True,
         cwd=tmpdir,
         stdout=subprocess.PIPE,
-        universal_newlines=True,
+        text=True,
     )
     expected = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
 
     # open the nested database
-    con = sqlite3.connect(f":memory:")
+    con = sqlite3.connect(":memory:")
     con.enable_load_extension(True)
     con.load_extension(os.path.join(BUILD, "zstd_vfs"))
     dbfn = os.path.join(tmpdir, "chinook_nested.sqlite")
@@ -120,12 +121,12 @@ def test_roundtrip_zstd(tmpdir, chinook_file):
 
     # dump from the zstd version
     rslt = subprocess.run(
-        f"sqlite3 :memory: -bail -cmd '.load {os.path.join(BUILD,'zstd_vfs')}' -cmd '.open file:{dbfn}?mode=ro&vfs=zstd' -cmd .dump -cmd .exit",
+        f"sqlite3 :memory: -bail -cmd '.load {os.path.join(BUILD, 'zstd_vfs')}' -cmd '.open file:{dbfn}?mode=ro&vfs=zstd' -cmd .dump -cmd .exit",
         check=True,
         shell=True,
         cwd=tmpdir,
         stdout=subprocess.PIPE,
-        universal_newlines=True,
+        text=True,
     )
     actual = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
     assert actual == expected
@@ -146,11 +147,11 @@ def test_roundtrip_zstd(tmpdir, chinook_file):
 def test_db_in_root():
     # regression test, create db with relative path to root directory
     # (this tends to happen in docker)
-    con = sqlite3.connect(f":memory:")
+    con = sqlite3.connect(":memory:")
     con.enable_load_extension(True)
     con.load_extension(os.path.join(BUILD, "zstd_vfs"))
     os.chdir("/")
-    con = sqlite3.connect(f"file:test_in_root.db?vfs=zstd", uri=True)
+    con = sqlite3.connect("file:test_in_root.db?vfs=zstd", uri=True)
     con.executescript("CREATE TABLE hello(x INTEGER)")
     con.commit()
 
@@ -169,12 +170,12 @@ def test_vacuum(tmpdir, chinook_file):
 
     # dump from the zstd version
     rslt = subprocess.run(
-        f"sqlite3 :memory: -bail -cmd '.load {os.path.join(BUILD,'zstd_vfs')}' -cmd '.open file:{dbfn}?mode=ro&vfs=zstd' -cmd .dump -cmd .exit",
+        f"sqlite3 :memory: -bail -cmd '.load {os.path.join(BUILD, 'zstd_vfs')}' -cmd '.open file:{dbfn}?mode=ro&vfs=zstd' -cmd .dump -cmd .exit",
         check=True,
         shell=True,
         cwd=tmpdir,
         stdout=subprocess.PIPE,
-        universal_newlines=True,
+        text=True,
     )
     actual = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
 
@@ -187,7 +188,7 @@ def test_vacuum(tmpdir, chinook_file):
         shell=True,
         cwd=tmpdir,
         stdout=subprocess.PIPE,
-        universal_newlines=True,
+        text=True,
     )
     expected = [stmt.strip() for stmt in rslt.stdout.split(";\n")]
     assert actual == expected
@@ -235,7 +236,7 @@ def test_sam(tmpdir):
         f"""
         {{ echo 'PRAGMA page_size={page_size};'; zstd -dc {region}.sam.zst | sed s/\\'/\\'\\'/g | awk -f sam2sql.awk; }} \
             | sqlite3 :memory: -bail \
-                -cmd '.load {os.path.join(BUILD,'zstd_vfs')}' \
+                -cmd '.load {os.path.join(BUILD, "zstd_vfs")}' \
                 -cmd '.open file:{region}.zstd.sqlite?vfs=zstd&outer_unsafe=true&outer_page_size={outer_page_size}&level={level}'
         """,
         check=True,
@@ -246,7 +247,7 @@ def test_sam(tmpdir):
         f"""
         {{ echo 'PRAGMA page_size={page_size};'; zstd -dc {region}.sam.zst | sed s/\\'/\\'\\'/g | awk -f sam2sql.awk; }} \
             | sqlite3 :memory: -bail \
-                -cmd '.load {os.path.join(BUILD,'zstd_vfs')}' \
+                -cmd '.load {os.path.join(BUILD, "zstd_vfs")}' \
                 -cmd '.open file:{region}.zstd.nodict.sqlite?vfs=zstd&outer_unsafe=true&outer_page_size={outer_page_size}&level={level}&dict=false'
         """,
         check=True,
@@ -259,7 +260,7 @@ def test_sam(tmpdir):
         shell=True,
         cwd=tmpdir,
     )
-    subprocess.run(["ls", "-lh"], cwd=tmpdir)
+    subprocess.run(["ls", "-lh"], cwd=tmpdir, check=False)
 
     # verify db file size is in the ballpark of the sam.zst file size
     sam_zst = os.path.join(tmpdir, f"{region}.sam.zst")
@@ -307,7 +308,7 @@ def report_elapsed(msg, file=sys.stderr):
     t0 = time.time()
     yield
     t = time.time() - t0
-    print(f"{round(t,3)}{msg}", file=file)
+    print(f"{round(t, 3)}{msg}", file=file)
 
 
 def test_tpch(tmpdir):
@@ -328,7 +329,7 @@ def test_tpch(tmpdir):
         ],
         check=True,
         stdout=subprocess.PIPE,
-        universal_newlines=True,
+        text=True,
     )
     print(results.stdout)
     results = json.loads(results.stdout)
@@ -343,7 +344,7 @@ def test_web():
     DB_URL = (
         "https://github.com/mlin/sqlite_zstd_vfs/releases/download/web-test-db-v3/TPC-H.zstd.db"
     )
-    con = sqlite3.connect(f":memory:")
+    con = sqlite3.connect(":memory:")
     con.enable_load_extension(True)
     con.load_extension(os.path.join(BUILD, "zstd_vfs"))
     con = sqlite3.connect(
