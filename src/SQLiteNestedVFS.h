@@ -223,13 +223,18 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         }
 
         // reset the outer database cursor; should be done when it otherwise might go stale.
+        // Invariant: cursor_pageno == 0 only if the cursor is unpositioned (safe to bind).
+        // The reset must therefore be unconditional: the cursor can be left stepped with
+        // cursor_pageno already 0 (e.g. stepped onto a neighbouring page by a "missing
+        // page" seek, before SeekCursor throws). tryReset() because this is also called
+        // from the destructor and from noexcept Execute(): sqlite3_reset() resets the
+        // statement even when it returns the preceding execution's error code, and
+        // tryReset() discards that already-handled status instead of propagating it.
         virtual void ResetCursor() {
             src = nullptr;
             src_size = 0;
-            if (cursor_pageno > 0) {
-                cursor.reset();
-                cursor_pageno = 0;
-            }
+            cursor.tryReset();
+            cursor_pageno = 0;
             last_op = 0;
         }
 
@@ -336,7 +341,11 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 DecodePage();
             } catch (std::exception &exn) {
                 errmsg = exn.what();
-                cursor_pageno = 0;
+                // SeekCursor/DecodePage may have left the cursor stepped (possibly on a
+                // different page than cursor_pageno records, or in DONE state); restore
+                // the invariant that cursor_pageno == 0 means unpositioned, lest the
+                // next use bind() a stepped statement and fail with SQLITE_MISUSE.
+                ResetCursor();
             }
             PutState(State::DONE);
         }
