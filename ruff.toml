@@ -2,6 +2,7 @@
 # Opt out of specific rules only where warranted; each opt-out is documented
 # inline. No rule sets are selected or opted into.
 line-length = 100 # exception to the ruff default (88): matches this codebase's black -l 100 formatting; avoids a whole-tree reformat
+target-version = "py310" # assumed Python floor (3.10) for this tree's Python scripts
 
 [lint]
 # No opt-outs warranted in this tree (E722 omitted: no bare except occurs here).
