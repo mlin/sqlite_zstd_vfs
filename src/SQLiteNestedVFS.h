@@ -28,6 +28,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #ifndef _WIN32
@@ -446,9 +447,10 @@ class InnerDatabaseFile : public SQLiteVFS::File {
 
         if (!job->errmsg.empty()) {
             SQLITE_NVFS_LOG(1, job->errmsg)
+            std::string job_errmsg = job->errmsg; // Renew() clears job->errmsg
             job->Renew();
             PrefetchBarrier();
-            throw SQLite::Exception(job->errmsg, SQLITE_IOERR_READ);
+            throw SQLite::Exception(job_errmsg, SQLITE_IOERR_READ);
         }
 
         if (job->dest != dest) {
@@ -1123,6 +1125,14 @@ class VFS : public SQLiteVFS::Wrapper {
     // prevent confusion between different nested VFS encodings
     std::string inner_db_tablename_prefix_ = "inner_vfs_";
     std::string inner_db_filename_suffix_ = "-inner", last_error_;
+    // guards last_error_: xOpen/xFullPathname/xGetLastError may be called concurrently
+    // from application threads
+    std::mutex last_error_mutex_;
+
+    void SetLastError(const std::string &err) {
+        std::lock_guard<std::mutex> lock(last_error_mutex_);
+        last_error_ = err;
+    }
 
     size_t szOsFile() override {
         return std::max(SQLiteVFS::Wrapper::szOsFile(), (size_t)wrapped_->szOsFile);
@@ -1191,8 +1201,8 @@ class VFS : public SQLiteVFS::Wrapper {
                     }
                     if (outer_db_filename.empty() ||
                         sName.substr(outer_db_filename.size()) != inner_db_filename_suffix_) {
-                        last_error_ = "inner database filename unexpectedly missing suffix " +
-                                      inner_db_filename_suffix_;
+                        SetLastError("inner database filename unexpectedly missing suffix " +
+                                     inner_db_filename_suffix_);
                         return SQLITE_CANTOPEN_FULLPATH;
                     }
                 }
@@ -1292,8 +1302,9 @@ class VFS : public SQLiteVFS::Wrapper {
                     *pOutFlags = flags;
                     return SQLITE_OK;
                 } catch (SQLite::Exception &exn) {
-                    last_error_ = exn.getErrorStr();
-                    SQLITE_NVFS_LOG(1, last_error_)
+                    std::string errstr = exn.getErrorStr();
+                    SetLastError(errstr);
+                    SQLITE_NVFS_LOG(1, errstr)
                     return SQLITE_CANTOPEN;
                 }
             }
@@ -1347,7 +1358,7 @@ class VFS : public SQLiteVFS::Wrapper {
         if (outer_db_filename.size() > inner_db_filename_suffix_.size() &&
             outer_db_filename.substr(outer_db_filename.size() - inner_db_filename_suffix_.size()) ==
                 inner_db_filename_suffix_) {
-            last_error_ = "nested VFS database name mustn't end with " + inner_db_filename_suffix_;
+            SetLastError("nested VFS database name mustn't end with " + inner_db_filename_suffix_);
             return SQLITE_CANTOPEN_FULLPATH;
         }
         std::string inner_db_filename = outer_db_filename + inner_db_filename_suffix_;
@@ -1361,8 +1372,13 @@ class VFS : public SQLiteVFS::Wrapper {
     }
 
     int GetLastError(int nByte, char *zErrMsg) override {
-        if (nByte && last_error_.size()) {
-            strncpy(zErrMsg, last_error_.c_str(), nByte);
+        std::string last_error;
+        {
+            std::lock_guard<std::mutex> lock(last_error_mutex_);
+            last_error = last_error_;
+        }
+        if (nByte && last_error.size()) {
+            strncpy(zErrMsg, last_error.c_str(), nByte);
             zErrMsg[nByte - 1] = 0;
             return SQLITE_OK;
         }
