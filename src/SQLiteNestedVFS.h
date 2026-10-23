@@ -999,6 +999,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             if (!read_only_) {
                 int rc;
                 if ((rc = Sync(0)) != SQLITE_OK) { // includes UpsertBarrier
+                    SQLiteVFS::File::Close();      // deletes this
                     return rc;
                 }
                 outer_db_->exec("PRAGMA incremental_vacuum");
@@ -1110,7 +1111,7 @@ std::string urlencode(const std::string &s, bool keep_slash = false) {
         } else {
             escaped.append("%");
             char buf[3];
-            sprintf(buf, "%.2X", s[i]);
+            sprintf(buf, "%.2X", static_cast<unsigned char>(s[i]));
             escaped.append(buf);
         }
     }
@@ -1355,7 +1356,7 @@ class VFS : public SQLiteVFS::Wrapper {
             return SQLITE_TOOBIG;
         }
         strncpy(zPathOut, inner_db_filename.c_str(), nPathOut - 1);
-        zPathOut[nPathOut] = 0;
+        zPathOut[nPathOut - 1] = 0;
         SQLITE_VFS_LOG(4, "FullPathname " << zName2 << " => " << zPathOut)
         return SQLITE_OK;
     }
