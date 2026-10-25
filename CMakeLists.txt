@@ -71,8 +71,8 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     FetchContent_MakeAvailable(catch)
     include_directories(${catch_SOURCE_DIR}/single_include)
 
-    add_executable(test_exe test/test.cc test/test_vfstrace.c src/SQLiteNestedVFS.h)
-    target_link_libraries(test_exe PRIVATE SQLiteCpp sqlite3)
+    add_executable(test_exe test/test.cc test/test_vfstrace.c src/SQLiteNestedVFS.h src/zstd_vfs.h)
+    target_link_libraries(test_exe PRIVATE SQLiteCpp sqlite3 zstd)
 
     include(CTest)
     enable_testing()

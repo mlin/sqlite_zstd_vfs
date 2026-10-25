@@ -223,14 +223,15 @@ class InnerDatabaseFile : public SQLiteVFS::File {
             PutState(State::NEW);
         }
 
-        // reset the outer database cursor; should be done when it otherwise might go stale.
+        // Reset the outer database cursor whenever its position is stale or
+        // unknown. cursor_pageno == 0 must mean safe to bind, but missing-page
+        // seeks can leave it stepped at 0: reset unconditionally via
+        // tryReset(), which discards prior execution errors without throwing.
         virtual void ResetCursor() {
             src = nullptr;
             src_size = 0;
-            if (cursor_pageno > 0) {
-                cursor.reset();
-                cursor_pageno = 0;
-            }
+            cursor.tryReset();
+            cursor_pageno = 0;
             last_op = 0;
         }
 
@@ -337,7 +338,7 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                 DecodePage();
             } catch (std::exception &exn) {
                 errmsg = exn.what();
-                cursor_pageno = 0;
+                ResetCursor();
             }
             PutState(State::DONE);
         }
