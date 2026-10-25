@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "../src/SQLiteNestedVFS.h"
+#include "../src/zstd_vfs.h"
 
 using namespace std;
 
@@ -18,6 +19,14 @@ void setup() {
     if (first) {
         (new SQLiteNested::VFS)->Register("nested");
         vfstrace_register("nested_trace", "nested", fputs, stderr, 0);
+        first = false;
+    }
+}
+
+void setup_zstd() {
+    static bool first = true;
+    if (first) {
+        (new ZstdVFS)->Register("zstd");
         first = false;
     }
 }
@@ -82,6 +91,65 @@ TEST_CASE("bigpages") {
             std::cerr << q.getColumn(1).getString() << std::endl;
         }
     }
+}
+
+// noprefetch=1 keeps fetches in the foreground; this fixture's probes reuse the failed job.
+TEST_CASE("fetch cursor recovers after page errors") {
+    string testdir("/tmp/sqlite3_nested_vfs_test_XXXXXX");
+    REQUIRE(mkdtemp((char *)testdir.data()) != nullptr);
+
+    setup_zstd();
+
+    const string dbfile = testdir + "/t.db";
+    const string uri = "file:" + dbfile + "?noprefetch=1";
+    const int rw_flags = SQLite::OPEN_READWRITE | SQLite::OPEN_CREATE | SQLite::OPEN_URI;
+
+    int64_t mroot = 0;
+    {
+        SQLite::Database guest(uri, rw_flags, 0, "zstd");
+        guest.exec("CREATE TABLE u(x)");
+        guest.exec("INSERT INTO u VALUES('u-row')");
+        guest.exec("CREATE TABLE t(x)");
+        guest.exec("WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM c WHERE n<300)"
+                   " INSERT INTO t SELECT zeroblob(1900) FROM c");
+        guest.exec("CREATE TABLE m(x)");
+        guest.exec("INSERT INTO m VALUES('m-row')");
+        guest.exec("CREATE TABLE v(x)");
+        guest.exec("INSERT INTO v VALUES('v-row')");
+        mroot = guest.execAndGet("SELECT rootpage FROM sqlite_master WHERE name='m'").getInt64();
+        REQUIRE(mroot > 0);
+    }
+
+    // Preserve the blob length while making its contents undecodable.
+    {
+        SQLite::Database outer(dbfile, SQLite::OPEN_READWRITE);
+        outer.exec("PRAGMA journal_mode=WAL");
+        outer.exec("UPDATE nested_vfs_zstd_pages SET data=zeroblob(length(data))"
+                   " WHERE pageno=20");
+    }
+
+    {
+        SQLite::Database guest(uri, SQLite::OPEN_READWRITE | SQLite::OPEN_URI, 0, "zstd");
+        guest.exec("PRAGMA cache_size=10");
+        REQUIRE_THROWS_AS(guest.execAndGet("SELECT count(*) FROM t"), SQLite::Exception);
+        REQUIRE(guest.execAndGet("SELECT x FROM u").getString() == "u-row");
+    }
+
+#ifdef NDEBUG
+    // Debug builds assert on gaps at open; trailing table v preserves the apparent file size.
+    // Seeking m's missing root steps past it with cursor_pageno == 0.
+    {
+        SQLite::Database outer(dbfile, SQLite::OPEN_READWRITE);
+        outer.exec("DELETE FROM nested_vfs_zstd_pages WHERE pageno=" + std::to_string(mroot));
+    }
+
+    {
+        SQLite::Database guest(uri, SQLite::OPEN_READWRITE | SQLite::OPEN_URI, 0, "zstd");
+        guest.exec("PRAGMA cache_size=10");
+        REQUIRE_THROWS_AS(guest.execAndGet("SELECT x FROM m"), SQLite::Exception);
+        REQUIRE(guest.execAndGet("SELECT x FROM u").getString() == "u-row");
+    }
+#endif
 }
 
 void ElementaryCellularAutomaton(uint8_t rule, const vector<bool> &state, vector<bool> &ans) {
