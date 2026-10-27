@@ -66,7 +66,7 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     FetchContent_Declare(
         catch
         GIT_REPOSITORY  https://github.com/catchorg/Catch2.git
-        GIT_TAG         v2.13.10
+        GIT_TAG         182c910b4b63ff587a3440e08f84f70497e49a81 # v2.13.10
     )
     FetchContent_MakeAvailable(catch)
     include_directories(${catch_SOURCE_DIR}/single_include)
