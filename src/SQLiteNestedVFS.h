@@ -434,8 +434,11 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                     break;
                 }
                 while (job->GetState(std::memory_order_relaxed) != FetchJob::State::DONE) {
+                    // spin on the CPU's pause hint; std::this_thread::yield() is an OS syscall
 #ifdef __x86_64__
                     __builtin_ia32_pause();
+#elif defined(__aarch64__)
+                    __asm__ __volatile__("yield");
 #else
                     std::this_thread::yield();
 #endif
