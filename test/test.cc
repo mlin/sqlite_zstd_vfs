@@ -2,8 +2,10 @@
 #define SQLITE_CORE
 #include "SQLiteCpp/SQLiteCpp.h"
 #include "catch2/catch.hpp"
+#include <atomic>
 #include <iostream>
 #include <sqlite3ext.h>
+#include <thread>
 #include <vector>
 
 #include "../src/SQLiteNestedVFS.h"
@@ -361,6 +363,102 @@ TEST_CASE("cellular_automata") {
         experiment.exec("VACUUM INTO 'file:" + testdir + "/experiment_vacuumed?vfs=nested'");
     }
     system(("ls -lh " + testdir).c_str());
+}
+
+TEST_CASE("close vacuums the outer database only if the connection wrote") {
+    string testdir("/tmp/sqlite3_nested_vfs_test_XXXXXX");
+    REQUIRE(mkdtemp((char *)testdir.data()) != nullptr);
+
+    setup();
+
+    // the outer database is the file itself; the inner database lives in its pages table
+    const string dbfile = testdir + "/vacuum";
+    {
+        SQLite::Database guest(dbfile, SQLite::OPEN_READWRITE | SQLite::OPEN_CREATE, 0, "nested");
+        guest.exec("CREATE TABLE t (x TEXT)");
+        SQLite::Transaction txn(guest);
+        for (int i = 0; i < 200; i++) {
+            guest.exec("INSERT INTO t VALUES (zeroblob(1024))");
+        }
+        txn.commit();
+    }
+
+    auto outer_freelist_count = [&]() {
+        SQLite::Database outer(dbfile, SQLite::OPEN_READONLY);
+        return outer.execAndGet("PRAGMA freelist_count").getInt();
+    };
+
+    // seed the outer freelist without triggering nested close-time vacuuming
+    {
+        SQLite::Database outer(dbfile, SQLite::OPEN_READWRITE);
+        outer.exec("CREATE TABLE scratch (x BLOB)");
+        SQLite::Transaction txn(outer);
+        for (int i = 0; i < 200; i++) {
+            outer.exec("INSERT INTO scratch VALUES (zeroblob(4000))");
+        }
+        txn.commit();
+        outer.exec("DROP TABLE scratch");
+    }
+    const int freelist = outer_freelist_count();
+    REQUIRE(freelist > 0);
+
+    // a read-write connection that only reads must leave the existing outer freelist untouched
+    {
+        SQLite::Database guest(dbfile, SQLite::OPEN_READWRITE, 0, "nested");
+        REQUIRE(guest.execAndGet("SELECT count(*) FROM t").getInt() == 200);
+    }
+    REQUIRE(outer_freelist_count() == freelist);
+
+    // a writer's close must still reclaim the outer freelist
+    {
+        SQLite::Database guest(dbfile, SQLite::OPEN_READWRITE, 0, "nested");
+        guest.exec("INSERT INTO t VALUES ('x')");
+    }
+    REQUIRE(outer_freelist_count() == 0);
+}
+
+TEST_CASE("concurrent opens survive read-write close churn") {
+    string testdir("/tmp/sqlite3_nested_vfs_test_XXXXXX");
+    REQUIRE(mkdtemp((char *)testdir.data()) != nullptr);
+
+    setup();
+
+    const string dbfile = testdir + "/churn";
+    {
+        SQLite::Database guest(dbfile, SQLite::OPEN_READWRITE | SQLite::OPEN_CREATE, 0, "nested");
+        guest.exec("CREATE TABLE t (x INTEGER)");
+        guest.exec("INSERT INTO t VALUES (1)");
+    }
+
+    // a never-wrote close must not take the outer write lock and make concurrent opens fail
+    const int NTHREADS = 4, NITERS = 1000;
+    std::atomic<int> n_opened{0}, n_cantopen{0}, n_other_errors{0};
+    auto churn = [&]() {
+        for (int i = 0; i < NITERS; i++) {
+            try {
+                SQLite::Database guest(dbfile, SQLite::OPEN_READWRITE, 0, "nested");
+                guest.execAndGet("SELECT count(*) FROM t");
+                n_opened++;
+            } catch (SQLite::Exception &exn) {
+                if ((exn.getErrorCode() & 0xFF) == SQLITE_CANTOPEN) {
+                    n_cantopen++;
+                } else {
+                    n_other_errors++;
+                }
+            }
+        }
+    };
+    std::vector<std::thread> threads;
+    for (int i = 0; i < NTHREADS; i++) {
+        threads.emplace_back(churn);
+    }
+    for (auto &thread : threads) {
+        thread.join();
+    }
+
+    REQUIRE(n_other_errors == 0);
+    REQUIRE(n_cantopen == 0);
+    REQUIRE(n_opened == NTHREADS * NITERS);
 }
 
 /*
