@@ -608,8 +608,12 @@ class InnerDatabaseFile : public SQLiteVFS::File {
     // 2 above, inner db should always recover to a consistent state.
     std::unique_ptr<SQLite::Transaction> txn_;
     std::unique_ptr<SQLite::Statement> insert_page_, update_page_, delete_pages_;
+    // Retain write-path history across Sync(): connections that never called begin()
+    // freed no outer pages and need not vacuum at close.
+    bool wrote_ = false;
     void begin() {
         assert(!read_only_);
+        wrote_ = true;
         if (!txn_) {
             txn_.reset(new SQLite::Transaction(*outer_db_));
         }
@@ -1008,7 +1012,9 @@ class InnerDatabaseFile : public SQLiteVFS::File {
                     SQLiteVFS::File::Close();      // deletes this
                     return rc;
                 }
-                outer_db_->exec("PRAGMA incremental_vacuum");
+                if (wrote_) {
+                    outer_db_->exec("PRAGMA incremental_vacuum");
+                }
             }
         } catch (SQLite::Exception &exn) {
             SQLITE_NVFS_LOG(1, exn.what())
