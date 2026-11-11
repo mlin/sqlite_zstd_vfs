@@ -603,9 +603,10 @@ class InnerDatabaseFile : public SQLiteVFS::File {
      *********************************************************************************************/
 
     // On the first Write() we open a transaction with the outer db as a buffer for this and
-    // subsequent writes, which we commit upon Sync() or Close(). We never explicitly rollback
-    // this transaction, although rollback may occur if the process/host crashes. By Assumption
-    // 2 above, inner db should always recover to a consistent state.
+    // subsequent writes, which we commit upon Sync(), upon the inner lock dropping to SHARED
+    // at the end of a write transaction (see Unlock()), or upon Close(). We never explicitly
+    // rollback this transaction, although rollback may occur if the process/host crashes. By
+    // Assumption 2 above, inner db should always recover to a consistent state.
     std::unique_ptr<SQLite::Transaction> txn_;
     std::unique_ptr<SQLite::Statement> insert_page_, update_page_, delete_pages_;
     // Retain write-path history across Sync(): connections that never called begin()
@@ -977,6 +978,23 @@ class InnerDatabaseFile : public SQLiteVFS::File {
         return SQLITE_OK;
     }
     int Unlock(int eLock) override {
+        if (eLock == SQLITE_LOCK_SHARED && txn_) {
+            // The pager drops the file lock to SHARED as a write transaction ends, but under
+            // PRAGMA synchronous=OFF it issues no Sync() at commit, so without this the outer
+            // transaction would stay open -- the inner commits neither durable nor visible to
+            // other connections -- until Close(). Commit it here instead, through the same
+            // path as Sync(). Under NORMAL/FULL/EXTRA the pager already called Sync(), so
+            // txn_ is null and this is a no-op; it likewise never fires mid-transaction, as
+            // the lock is held from the first write until the transaction ends (across
+            // savepoints and pager cache spills alike). If the transaction instead rolled
+            // back, txn_ holds the restored pre-transaction pages, an equally consistent
+            // state to commit. Connections setting locking_mode=EXCLUSIVE never drop the
+            // lock until close, so they're unaffected: Close() still commits for them.
+            int rc = Sync(0);
+            if (rc != SQLITE_OK) {
+                return rc;
+            }
+        }
         if (eLock == SQLITE_LOCK_NONE) {
             // wipe internal state that's liable to go stale after relinquishing read lock
             page_count_ = 0;

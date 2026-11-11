@@ -303,6 +303,152 @@ def test_sam(tmpdir):
         assert next(con.execute("select sum(pos+flag) from sam"))[0] == expected_posflag
 
 
+def _connect_vfs(dbfn, vfs, **kwargs):
+    con0 = sqlite3.connect(":memory:")
+    con0.enable_load_extension(True)
+    con0.load_extension(os.path.join(BUILD, vfs + "_vfs"))
+    return sqlite3.connect(f"file:{dbfn}?vfs={vfs}", uri=True, isolation_level=None, **kwargs)
+
+
+# Child process for the synchronous=OFF kill tests: performs the requested writes,
+# prints READY, then idles so the parent can SIGKILL it with no chance to close.
+_SYNC_KILL_CHILD = """
+import os
+import sqlite3
+import sys
+import time
+
+build, dbfn, vfs, sync, shape = sys.argv[1:6]
+con0 = sqlite3.connect(":memory:")
+con0.enable_load_extension(True)
+con0.load_extension(os.path.join(build, vfs + "_vfs"))
+con = sqlite3.connect(f"file:{dbfn}?vfs={vfs}", uri=True, isolation_level=None)
+if shape == "exclusive":
+    con.execute("PRAGMA locking_mode=EXCLUSIVE")
+con.execute(f"PRAGMA synchronous={sync}")
+if shape in ("commits", "exclusive"):
+    con.execute("CREATE TABLE t (x INTEGER)")
+    for v in (1, 2, 3):
+        con.execute("INSERT INTO t VALUES (?)", (v,))
+elif shape == "midtxn":
+    con.execute("CREATE TABLE t (x TEXT)")
+    con.execute("INSERT INTO t VALUES ('committed')")
+    con.execute("PRAGMA cache_size=10")
+    con.execute("BEGIN")
+    con.executemany("INSERT INTO t VALUES (?)", [("y" * 200,)] * 3000)
+print("READY", flush=True)
+while True:
+    time.sleep(60)
+"""
+
+
+def _spawn_sync_child(tmpdir, vfs, sync, shape):
+    dbfn = str(tmpdir.join(f"sync_{vfs}_{sync}_{shape}.db"))
+    child_py = str(tmpdir.join("sync_kill_child.py"))
+    with open(child_py, "w") as out:
+        out.write(_SYNC_KILL_CHILD)
+    errfn = str(tmpdir.join("sync_kill_child.err"))
+    with open(errfn, "wb") as err:
+        proc = subprocess.Popen(
+            [sys.executable, child_py, BUILD, dbfn, vfs, sync, shape],
+            stdout=subprocess.PIPE,
+            stderr=err,
+            text=True,
+        )
+    if proc.stdout.readline().strip() != "READY":
+        with open(errfn) as err:
+            raise AssertionError("sync kill-test child failed to start:\n" + err.read())
+    return proc, dbfn
+
+
+def _kill(proc):
+    proc.kill()  # SIGKILL: no cleanup, no close
+    proc.wait()
+
+
+@pytest.mark.parametrize("vfs", ["nested", "zstd"])
+def test_sync_off_commits_survive_process_kill(tmpdir, vfs):
+    # under synchronous=OFF, a commit must reach the outer database when its write
+    # transaction ends -- not only at close -- so abrupt process death loses nothing
+    # that was acknowledged, including the schema itself
+    proc, dbfn = _spawn_sync_child(tmpdir, vfs, "OFF", "commits")
+    _kill(proc)
+    con = _connect_vfs(dbfn, vfs)
+    assert next(con.execute("PRAGMA integrity_check"))[0] == "ok"
+    assert [r[0] for r in con.execute("SELECT x FROM t ORDER BY x")] == [1, 2, 3]
+    con.close()
+
+
+@pytest.mark.parametrize("vfs", ["nested", "zstd"])
+def test_sync_normal_commits_survive_process_kill(tmpdir, vfs):
+    # control: NORMAL commits were already durable per commit before this behavior
+    # was extended to OFF
+    proc, dbfn = _spawn_sync_child(tmpdir, vfs, "NORMAL", "commits")
+    _kill(proc)
+    con = _connect_vfs(dbfn, vfs)
+    assert next(con.execute("PRAGMA integrity_check"))[0] == "ok"
+    assert [r[0] for r in con.execute("SELECT x FROM t ORDER BY x")] == [1, 2, 3]
+    con.close()
+
+
+@pytest.mark.parametrize("vfs", ["nested", "zstd"])
+def test_sync_off_kill_mid_transaction(tmpdir, vfs):
+    # death inside a later, cache-spilling transaction must expose exactly the last
+    # committed state: the earlier commit survives, the in-flight one leaves no trace
+    proc, dbfn = _spawn_sync_child(tmpdir, vfs, "OFF", "midtxn")
+    _kill(proc)
+    con = _connect_vfs(dbfn, vfs)
+    assert next(con.execute("PRAGMA integrity_check"))[0] == "ok"
+    assert [r[0] for r in con.execute("SELECT x FROM t")] == ["committed"]
+    con.close()
+
+
+@pytest.mark.parametrize("sync", ["OFF", "NORMAL"])
+def test_sync_commit_excludes_other_connections_until_close(tmpdir, sync):
+    # once a writer commits, the documented EXCLUSIVE outer locking excludes
+    # other connections for the writer's lifetime, in every synchronous mode;
+    # after it closes, the committed data is there. OFF previously deviated:
+    # its commits sat in the writer's still-open outer transaction, so a second
+    # connection could open and silently read the pre-commit state instead.
+    dbfn = str(tmpdir.join(f"sync_{sync.lower()}_exclusion.db"))
+    base = _connect_vfs(dbfn, "nested")
+    base.execute("CREATE TABLE t (x INTEGER)")
+    base.execute("INSERT INTO t VALUES (1)")
+    base.close()
+
+    con1 = _connect_vfs(dbfn, "nested")
+    con1.execute(f"PRAGMA synchronous={sync}")
+    con1.execute("BEGIN")
+    con1.execute("INSERT INTO t VALUES (2)")
+    con1.execute("COMMIT")
+    with pytest.raises(sqlite3.OperationalError, match="unable to open"):
+        con2 = _connect_vfs(dbfn, "nested")
+        con2.execute("SELECT sum(x) FROM t").fetchone()
+    con1.close()
+
+    con2 = _connect_vfs(dbfn, "nested")
+    assert next(con2.execute("SELECT sum(x) FROM t"))[0] == 3
+    con2.close()
+
+
+def test_sync_off_exclusive_locking_takes_effect_at_close(tmpdir):
+    # residue: a connection that itself sets locking_mode=EXCLUSIVE drops no lock
+    # until close, so its OFF commits still take effect only at close -- but they
+    # do take effect then
+    dbfn = str(tmpdir.join("sync_off_exclusive.db"))
+    con = _connect_vfs(dbfn, "nested")
+    con.execute("PRAGMA locking_mode=EXCLUSIVE")
+    con.execute("PRAGMA synchronous=OFF")
+    con.execute("CREATE TABLE t (x INTEGER)")
+    for v in (1, 2, 3):
+        con.execute("INSERT INTO t VALUES (?)", (v,))
+    con.close()
+    con = _connect_vfs(dbfn, "nested")
+    assert next(con.execute("PRAGMA integrity_check"))[0] == "ok"
+    assert [r[0] for r in con.execute("SELECT x FROM t ORDER BY x")] == [1, 2, 3]
+    con.close()
+
+
 @contextlib.contextmanager
 def report_elapsed(msg, file=sys.stderr):
     t0 = time.time()
