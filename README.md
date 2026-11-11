@@ -94,6 +94,7 @@ The extension also *includes* [web_vfs](https://github.com/mlin/sqlite_web_vfs).
 * Unix x86-64 oriented; help wanted for other platforms.
 * [EXCLUSIVE locking mode](https://www.sqlite.org/pragma.html#pragma_locking_mode) always applies (a writer excludes all other connections for the lifetime of its own connection).
   * Relaxing this is possible, but naturally demands rigorous concurrency testing. Help wanted.
+* With `PRAGMA synchronous=OFF`, inner commits are made durable when the write transaction ends, like other synchronous modes. The one exception is a connection that itself sets `PRAGMA locking_mode=EXCLUSIVE` on the inner database: its commits take effect at close.
 * WAL mode isn't yet supported; do not touch.
 * Several SQLite settings need tuning to get good performance (see below).
 * Once more: **USE AT YOUR OWN RISK**
